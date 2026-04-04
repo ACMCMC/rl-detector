@@ -5,9 +5,11 @@ from datasets import load_dataset
 from rl_detector.config import CFG
 
 
-def load_docs() -> list[dict]:
+def load_docs(split: str | None = None) -> list[dict]:
     """Load Ateeqq/AI-and-Human-Generated-Text as flat {"text", "label"} list."""
-    ds = load_dataset(CFG.data.dataset, split=CFG.data.split)
+    if split is None:
+        split = CFG.data.split
+    ds = load_dataset(CFG.data.dataset, split=split)
     docs = []
     for row in ds:
         text = row["abstract"]

@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import random
+import time
 
 import tinker
 import torch
@@ -18,7 +20,7 @@ from rl_detector.config import CFG
 from rl_detector.data import iter_balanced_steps, load_docs
 from rl_detector.frozen import get_client, rank_indicators
 from rl_detector.prompts import directed_ai, directed_human, neutral
-from rl_detector.rewards import compute_advantages, compute_reward, parse_indicators
+from rl_detector.rewards import compute_advantages, compute_reward, format_reward, parse_indicators
 from rl_detector.rollouts import generate_rollouts
 
 load_dotenv()
@@ -26,6 +28,115 @@ logger = logging.getLogger(__name__)
 
 # expose BASE_MODEL for annotate.py
 BASE_MODEL = CFG.model.base_model
+EVAL_SAMPLE_SIZE = 10
+EVAL_EVERY_STEPS = 5
+EVAL_SEED = 2262
+
+
+def _p95(values: list[int]) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    idx = max(0, min(len(ordered) - 1, int(0.95 * (len(ordered) - 1))))
+    return ordered[idx]
+
+
+async def _await_with_heartbeat(coro, step: int, phase: str, every_s: int = 20):
+    # keep emitting liveness logs while waiting on remote async work
+    task = asyncio.create_task(coro)
+    waited_s = 0
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=every_s)
+        if done:
+            return await task
+        waited_s += every_s
+        logger.info("step %d | still waiting on %s (%ds elapsed)", step, phase, waited_s)
+
+
+def _select_eval_docs(docs: list[dict], sample_size: int = EVAL_SAMPLE_SIZE, seed: int = EVAL_SEED) -> list[dict]:
+    rng = random.Random(seed)
+    ai_docs = [d for d in docs if d["label"] == 1]
+    human_docs = [d for d in docs if d["label"] == 0]
+    rng.shuffle(ai_docs)
+    rng.shuffle(human_docs)
+    n_ai = min(sample_size // 2, len(ai_docs))
+    n_human = min(sample_size - n_ai, len(human_docs))
+    chosen = ai_docs[:n_ai] + human_docs[:n_human]
+    if len(chosen) < sample_size:
+        remaining = [d for d in docs if d not in chosen]
+        rng.shuffle(remaining)
+        chosen.extend(remaining[: sample_size - len(chosen)])
+    rng.shuffle(chosen)
+    return chosen[:sample_size]
+
+
+async def _sample_standard_rollout(sampling_client, tokenizer, document: str) -> dict:
+    prompt_text_formatted = tokenizer.apply_chat_template(
+        [{"role": "user", "content": neutral(document)}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    prompt_tokens = tokenizer.encode(prompt_text_formatted)
+    model_input = tinker.ModelInput.from_ints(prompt_tokens)
+    sampled = await sampling_client.sample_async(
+        prompt=model_input,
+        num_samples=1,
+        sampling_params=tinker.SamplingParams(
+            max_tokens=CFG.sampling.max_tokens,
+            temperature=CFG.sampling.temperature,
+            top_p=CFG.sampling.top_p,
+        ),
+    )
+    seq = sampled.sequences[0]
+    completion_tokens = list(seq.tokens)
+    if seq.logprobs is not None:
+        completion_logprobs = list(seq.logprobs)
+    else:
+        completion_logprobs = [0.0] * len(completion_tokens)
+    return {
+        "completion_text": tokenizer.decode(completion_tokens),
+        "completion_tokens": completion_tokens,
+        "completion_logprobs": completion_logprobs,
+    }
+
+
+async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: list[dict], step: int) -> dict:
+    logger.info("eval | step %d | evaluating %d test docs with neutral prompt", step, len(eval_docs))
+    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+
+    async def score_eval_doc(doc):
+        rollout = await _sample_standard_rollout(sampling_client, tokenizer, doc["text"])
+        indicators = parse_indicators(rollout["completion_text"]) or []
+        format_ok = format_reward(rollout["completion_text"], doc["text"]) == 1.0
+        if not format_ok:
+            return 0.0, True, False, None
+        frozen_scored = await rank_indicators(frozen_client, rollout["completion_text"], indicators) if indicators else []
+        if indicators and frozen_scored is None:
+            return None, False, True, "frozen_parse_failed"
+        reward = compute_reward(rollout["completion_text"], doc["text"], doc["label"], frozen_scored)
+        return reward, True, True, None
+
+    results = await asyncio.gather(*[score_eval_doc(doc) for doc in eval_docs])
+    rewards = [0.0 if res[0] is None else res[0] for res in results if res[1]]
+    format_ok_flags = [res[2] for res in results if res[1]]
+    n_excluded = sum(1 for res in results if not res[1])
+
+    eval_reward_mean = (sum(rewards) / len(rewards)) if rewards else 0.0
+    eval_format_rate = (sum(1 for ok in format_ok_flags if ok) / len(format_ok_flags)) if format_ok_flags else 0.0
+
+    logger.info(
+        "eval | step %d | reward=%.3f format=%.2f excluded=%d",
+        step,
+        eval_reward_mean,
+        eval_format_rate,
+        n_excluded,
+    )
+
+    return {
+        "eval_reward_mean": eval_reward_mean,
+        "eval_format_rate": eval_format_rate,
+        "eval_n_excluded_rollouts": n_excluded,
+    }
 
 
 def build_datum(
@@ -82,20 +193,31 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc):
 
     async def score_and_reward(i, r):
         indicators = parse_indicators(r["completion_text"]) or []
+        format_ok = format_reward(r["completion_text"], document) == 1.0
         logger.info("scoring  | rollout %d/%d (%s-directed): %d tells", i + 1, CFG.training.k, prompt_directions[i], len(indicators))
+        if not format_ok:
+            logger.info("scoring  | rollout %d/%d format invalid, reward=0 and skip frozen scoring", i + 1, CFG.training.k)
+            return indicators, [], 0.0, True, None, False
         frozen_scored = await rank_indicators(frozen_client, r["completion_text"], indicators) if indicators else []
+        if indicators and frozen_scored is None:
+            logger.warning("scoring  | rollout %d/%d excluded: frozen score parse failed after retries", i + 1, CFG.training.k)
+            return indicators, [], None, False, "frozen_parse_failed", True
         reward = compute_reward(r["completion_text"], document, label, frozen_scored)
         agg = sum(s["score"] for s in frozen_scored) / len(frozen_scored) if frozen_scored else 0.0
         logger.info("scoring  | rollout %d/%d done — agg=%.3f reward=%.1f", i + 1, CFG.training.k, agg, reward)
-        return indicators, frozen_scored, reward
+        return indicators, frozen_scored, reward, True, None, True
 
     logger.info("scoring  | sending %d rollouts to frozen model", len(rollouts))
     results = await asyncio.gather(*[score_and_reward(i, r) for i, r in enumerate(rollouts)])
     all_indicators = [res[0] for res in results]
     all_frozen_scored = [res[1] for res in results]
     rewards = [res[2] for res in results]
+    used_for_optimization = [res[3] for res in results]
+    exclude_reasons = [res[4] for res in results]
+    format_ok_flags = [res[5] for res in results]
 
-    advantages = compute_advantages(rewards)
+    rewards_for_optimization = [rw for rw, use in zip(rewards, used_for_optimization) if use and rw is not None]
+    advantages = compute_advantages(rewards_for_optimization) if rewards_for_optimization else []
 
     neutral_tokens = tokenizer.encode(
         tokenizer.apply_chat_template(
@@ -105,7 +227,12 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc):
         )
     )
     datums = []
-    for r, adv in zip(rollouts, advantages):
+    adv_idx = 0
+    for i, r in enumerate(rollouts):
+        if not used_for_optimization[i]:
+            continue
+        adv = advantages[adv_idx]
+        adv_idx += 1
         if not r["completion_tokens"]:
             continue
         datum = build_datum(
@@ -116,18 +243,23 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc):
         )
         datums.append(datum)
 
-    reward_mean = sum(rewards) / len(rewards)
-    format_rate = sum(1 for rw in rewards if rw != 0.0) / len(rewards)
+    reward_mean = (sum(rewards_for_optimization) / len(rewards_for_optimization)) if rewards_for_optimization else 0.0
+    format_used = [fmt for fmt, use in zip(format_ok_flags, used_for_optimization) if use]
+    format_rate = (sum(1 for fmt in format_used if fmt) / len(format_used)) if format_used else 0.0
 
     doc_audit = {
         "document": document,
         "label": label,
         "reward_mean": reward_mean,
         "format_rate": format_rate,
+        "n_excluded_rollouts": sum(1 for use in used_for_optimization if not use),
         "rollouts": [
             {
                 "index": i,
                 "prompt_direction": prompt_directions[i],
+                "used_for_optimization": used_for_optimization[i],
+                "exclude_reason": exclude_reasons[i],
+                "format_ok": format_ok_flags[i],
                 "completion_text": r["completion_text"],
                 "completion_tokens_len": len(r["completion_tokens"]),
                 "completion_logprobs_len": len(r["completion_logprobs"]),
@@ -140,7 +272,7 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc):
                     for ind, fs in zip(all_indicators[i], all_frozen_scored[i])
                 ],
                 "reward": rewards[i],
-                "advantage": advantages[i],
+                "advantage": (advantages[sum(1 for u in used_for_optimization[:i + 1] if u) - 1] if used_for_optimization[i] else None),
             }
             for i, r in enumerate(rollouts)
         ],
@@ -158,8 +290,8 @@ async def train_step(
     audit_log,
 ) -> dict:
     """One GRPO update for a batch of docs. Returns aggregate metrics."""
-    logger.info("step %d | getting ephemeral sampling client", step)
-    sampling_client = await training_client.get_ephemeral_sampling_client_async()
+    logger.info("step %d | saving weights and getting sampling client", step)
+    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
 
     logger.info("step %d | processing %d docs", step, len(docs))
     doc_results = await asyncio.gather(
@@ -174,23 +306,64 @@ async def train_step(
 
     if not all_datums:
         logger.warning("step %d | no valid datums, skipping update", step)
-        return {"reward_mean": 0.0, "format_rate": 0.0}
+        return {
+            "train_reward_mean": 0.0,
+            "train_format_rate": 0.0,
+            "train_n_positive": 0,
+            "train_n_negative": 0,
+            "train_n_zero": 0,
+            "train_n_excluded_rollouts": 0,
+        }
+
+    completion_lens = [ro["completion_tokens_len"] for da in docs_audit for ro in da["rollouts"]]
+    completion_total = sum(completion_lens)
+    completion_mean = (completion_total / len(completion_lens)) if completion_lens else 0.0
+    logger.info(
+        "step %d | datum stats: n=%d completion_total=%d completion_mean=%.1f completion_p95=%d completion_max=%d",
+        step,
+        len(all_datums),
+        completion_total,
+        completion_mean,
+        _p95(completion_lens),
+        max(completion_lens) if completion_lens else 0,
+    )
 
     logger.info("step %d | forward/backward on %d datums", step, len(all_datums))
+    fb_t0 = time.perf_counter()
     fb_future = await training_client.forward_backward_async(
         data=all_datums,
         loss_fn="importance_sampling",
     )
-    await fb_future.result_async()
+    logger.info("step %d | forward/backward submitted, waiting for result", step)
+    fb_result = await _await_with_heartbeat(
+        fb_future.result_async(),
+        step,
+        f"forward/backward result ({len(all_datums)} datums)",
+    )
+    fb_dt = time.perf_counter() - fb_t0
+    if hasattr(fb_result, "loss"):
+        logger.info("step %d | forward/backward done in %.1fs loss=%s", step, fb_dt, fb_result.loss)
+    else:
+        logger.info("step %d | forward/backward done in %.1fs", step, fb_dt)
+
     logger.info("step %d | optimizer step", step)
+    opt_t0 = time.perf_counter()
     opt_future = await training_client.optim_step_async(
         tinker.AdamParams(learning_rate=CFG.training.learning_rate)
     )
-    await opt_future.result_async()
+    logger.info("step %d | optimizer submitted, waiting for result", step)
+    await _await_with_heartbeat(
+        opt_future.result_async(),
+        step,
+        "optimizer result",
+    )
+    logger.info("step %d | optimizer done in %.1fs", step, time.perf_counter() - opt_t0)
 
-    all_rewards = [ro["reward"] for da in docs_audit for ro in da["rollouts"]]
-    reward_mean = sum(all_rewards) / len(all_rewards)
-    format_rate = sum(1 for rw in all_rewards if rw != 0.0) / len(all_rewards)
+    all_rewards = [ro["reward"] for da in docs_audit for ro in da["rollouts"] if ro.get("used_for_optimization") and ro["reward"] is not None]
+    reward_mean = (sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0
+    all_format_ok = [ro.get("format_ok", False) for da in docs_audit for ro in da["rollouts"] if ro.get("used_for_optimization")]
+    format_rate = (sum(1 for ok in all_format_ok if ok) / len(all_format_ok)) if all_format_ok else 0.0
+    n_excluded_rollouts = sum(1 for da in docs_audit for ro in da["rollouts"] if not ro.get("used_for_optimization"))
 
     # per-rollout reward breakdown for wandb
     n_positive = sum(1 for rw in all_rewards if rw > 0)
@@ -207,11 +380,12 @@ async def train_step(
     audit_log.flush()
 
     return {
-        "reward_mean": reward_mean,
-        "format_rate": format_rate,
-        "n_positive": n_positive,
-        "n_negative": n_negative,
-        "n_zero": n_zero,
+        "train_reward_mean": reward_mean,
+        "train_format_rate": format_rate,
+        "train_n_positive": n_positive,
+        "train_n_negative": n_negative,
+        "train_n_zero": n_zero,
+        "train_n_excluded_rollouts": n_excluded_rollouts,
     }
 
 
@@ -237,41 +411,75 @@ async def main():
         )
 
     service_client = tinker.ServiceClient()
-    training_client = await service_client.create_lora_training_client_async(
-        base_model=CFG.model.base_model,
-        rank=CFG.model.lora_rank,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(CFG.model.base_model)
-    frozen_client = get_client()
+    loop = asyncio.get_event_loop()
 
-    all_docs = load_docs()
+    def _load_tokenizer():
+        logger.info("startup | loading tokenizer...")
+        tok = AutoTokenizer.from_pretrained(CFG.model.base_model)
+        logger.info("startup | tokenizer ready")
+        return tok
+
+    def _load_dataset():
+        logger.info("startup | loading dataset (%s)...", CFG.data.dataset)
+        docs = load_docs()
+        logger.info("startup | dataset ready (%d docs)", len(docs))
+        return docs
+
+    logger.info("startup | creating LoRA training client (base_model=%s, rank=%d) + loading tokenizer and dataset in parallel...", CFG.model.base_model, CFG.model.lora_rank)
+    training_client, tokenizer, all_docs, test_docs = await asyncio.gather(
+        service_client.create_lora_training_client_async(
+            base_model=CFG.model.base_model,
+            rank=CFG.model.lora_rank,
+        ),
+        loop.run_in_executor(None, _load_tokenizer),
+        loop.run_in_executor(None, _load_dataset),
+        loop.run_in_executor(None, lambda: load_docs(split="test")),
+    )
+    logger.info("startup | all ready")
+
+    eval_docs = _select_eval_docs(test_docs)
+
+    frozen_client = get_client()
     step = 0
     with open(CFG.training.audit_log_path, "w") as audit_log:
+        if eval_docs:
+            eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
+            if CFG.wandb.enabled:
+                wandb.log(eval_metrics, step=step)
+
         steps_iter = iter_balanced_steps(all_docs, docs_per_step=CFG.training.docs_per_step)
         pbar = tqdm(total=CFG.training.max_steps, desc="training", unit="step")
         for docs in steps_iter:
             metrics = await train_step(training_client, tokenizer, frozen_client, docs, step, audit_log)
             pbar.set_postfix(
-                reward=f"{metrics['reward_mean']:.3f}",
-                format=f"{metrics['format_rate']:.2f}",
+                train_reward=f"{metrics['train_reward_mean']:.3f}",
+                train_format=f"{metrics['train_format_rate']:.2f}",
             )
             pbar.update(1)
 
             if CFG.wandb.enabled:
                 wandb.log({
-                    "reward_mean": metrics["reward_mean"],
-                    "format_rate": metrics["format_rate"],
-                    "n_positive_rollouts": metrics["n_positive"],
-                    "n_negative_rollouts": metrics["n_negative"],
-                    "n_zero_rollouts": metrics["n_zero"],
+                    "train_reward_mean": metrics["train_reward_mean"],
+                    "train_format_rate": metrics["train_format_rate"],
+                    "train_n_positive_rollouts": metrics["train_n_positive"],
+                    "train_n_negative_rollouts": metrics["train_n_negative"],
+                    "train_n_zero_rollouts": metrics["train_n_zero"],
+                    "train_n_excluded_rollouts": metrics["train_n_excluded_rollouts"],
                 }, step=step)
 
             logger.info(
-                f"step={step} reward={metrics['reward_mean']:.3f} "
-                f"format={metrics['format_rate']:.2f} "
-                f"+={metrics['n_positive']} -={metrics['n_negative']} 0={metrics['n_zero']}"
+                f"step={step} train_reward={metrics['train_reward_mean']:.3f} "
+                f"train_format={metrics['train_format_rate']:.2f} "
+                f"+={metrics['train_n_positive']} -={metrics['train_n_negative']} 0={metrics['train_n_zero']} "
+                f"excluded={metrics['train_n_excluded_rollouts']}"
             )
             step += 1
+
+            if step % EVAL_EVERY_STEPS == 0 and eval_docs:
+                eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
+                if CFG.wandb.enabled:
+                    wandb.log(eval_metrics, step=step)
+
             if step >= CFG.training.max_steps:
                 logger.info("Reached max_steps, stopping.")
                 break

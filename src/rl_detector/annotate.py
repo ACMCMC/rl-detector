@@ -52,7 +52,7 @@ async def annotate(document: str, checkpoint_path: str | None = None) -> dict:
         )
 
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-    sampling_client = await training_client.get_ephemeral_sampling_client_async()
+    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
 
     prompt_tokens = tokenizer.encode(neutral(document))
     model_input = tinker.ModelInput.from_ints(prompt_tokens)

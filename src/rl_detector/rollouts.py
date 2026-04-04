@@ -18,10 +18,11 @@ async def generate_rollouts(
     """
     if K is None:
         K = CFG.training.k
-    directed_prompts = (
-        [directed_ai(document)] * (K // 2) +
-        [directed_human(document)] * (K // 2)
-    )
+    half_k = K // 2
+    directed_prompts = [
+        directed_ai(document),
+        directed_human(document),
+    ]
     sampling_params = tinker.SamplingParams(
         max_tokens=CFG.sampling.max_tokens,
         temperature=CFG.sampling.temperature,
@@ -38,23 +39,20 @@ async def generate_rollouts(
         model_input = tinker.ModelInput.from_ints(prompt_tokens)
         sampled = await sampling_client.sample_async(
             prompt=model_input,
-            num_samples=1,
+            num_samples=half_k,
             sampling_params=sampling_params,
         )
-        seq = sampled.sequences[0]
-        completion_tokens = list(seq.tokens)
-        if seq.logprobs is not None:
-            completion_logprobs = list(seq.logprobs)
-        else:
-            # compute logprobs separately if not returned inline
-            full_tokens = prompt_tokens + completion_tokens
-            full_input = tinker.ModelInput.from_ints(full_tokens)
-            all_logprobs = await sampling_client.compute_logprobs_async(full_input)
-            completion_logprobs = [lp or 0.0 for lp in all_logprobs[len(prompt_tokens):]]
-        completion_text = tokenizer.decode(completion_tokens)
-        results.append({
-            "completion_text": completion_text,
-            "completion_tokens": completion_tokens,
-            "completion_logprobs": completion_logprobs,
-        })
+        for seq in sampled.sequences:
+            completion_tokens = list(seq.tokens)
+            if seq.logprobs is not None:
+                completion_logprobs = list(seq.logprobs)
+            else:
+                # avoid extra API call cost; zeros keep tensor shapes valid
+                completion_logprobs = [0.0] * len(completion_tokens)
+            completion_text = tokenizer.decode(completion_tokens)
+            results.append({
+                "completion_text": completion_text,
+                "completion_tokens": completion_tokens,
+                "completion_logprobs": completion_logprobs,
+            })
     return results

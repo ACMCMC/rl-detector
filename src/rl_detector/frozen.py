@@ -34,44 +34,76 @@ async def rank_indicators(
     client: AsyncOpenAI,
     tagged_text: str,
     indicators: list[dict],
-) -> list[dict]:
+) -> list[dict] | None:
     """
     Score all indicators in a single frozen model call.
     Returns list of {score} dicts in the same order as indicators.
-    Falls back to 0.0 for all on parse failure.
+    Retries parse failures up to 3 times; returns None if still invalid.
     """
     if not indicators:
         return []
 
     n = len(indicators)
-    fallback = [{"score": 0.0} for _ in indicators]
+    max_attempts = 3
 
     prompt = FROZEN_SCORE_PROMPT.format(tagged_text=tagged_text)
 
-    async with _semaphore():
-        logger.debug("frozen | acquired slot (%d tells)", n)
-        response = await client.chat.completions.create(
-            model=CFG.frozen.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=CFG.frozen.max_tokens,
-            reasoning_effort=CFG.frozen.reasoning_effort,
+    sem = _semaphore()
+    for attempt in range(1, max_attempts + 1):
+        in_use_before = CFG.frozen.max_concurrent - sem._value
+        logger.info(
+            "frozen | waiting semaphore slot (%d tells, in_use=%d/%d, attempt=%d/%d)",
+            n,
+            in_use_before,
+            CFG.frozen.max_concurrent,
+            attempt,
+            max_attempts,
         )
-    content = response.choices[0].message.content or ""
-    logger.debug("frozen model raw response: %r", content)
+        async with sem:
+            in_use_after = CFG.frozen.max_concurrent - sem._value
+            logger.info(
+                "frozen | acquired semaphore slot (%d tells, in_use=%d/%d)",
+                n,
+                in_use_after,
+                CFG.frozen.max_concurrent,
+            )
+            response = await client.chat.completions.create(
+                model=CFG.frozen.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=CFG.frozen.max_tokens,
+                reasoning_effort=CFG.frozen.reasoning_effort,
+            )
+        logger.info("frozen | released semaphore slot (%d tells)", n)
+        content = response.choices[0].message.content or ""
+        logger.debug("frozen model raw response: %r", content)
 
-    raw_scores = re.findall(r'<tell\b[^>]*\bscore="([^"]+)"', content)
-    if len(raw_scores) != n:
-        logger.warning("frozen model score parse failed: found %d score= attrs, expected %d — raw: %r", len(raw_scores), n, content)
-        return fallback
+        raw_scores = re.findall(r'<tell\b[^>]*\bscore="([^"]+)"', content)
+        if len(raw_scores) != n:
+            logger.warning(
+                "frozen model score parse failed: found %d score= attrs, expected %d (attempt %d/%d)",
+                len(raw_scores),
+                n,
+                attempt,
+                max_attempts,
+            )
+            continue
 
-    try:
-        scores = [max(-1.0, min(1.0, float(s))) for s in raw_scores]
-    except ValueError as e:
-        logger.warning("frozen model score parse error: %s — raw: %r", e, content)
-        return fallback
+        try:
+            scores = [max(-1.0, min(1.0, float(s))) for s in raw_scores]
+        except ValueError as e:
+            logger.warning(
+                "frozen model score parse error: %s (attempt %d/%d)",
+                e,
+                attempt,
+                max_attempts,
+            )
+            continue
 
-    return [{"score": s} for s in scores]
+        return [{"score": s} for s in scores]
+
+    logger.warning("frozen model failed to produce valid scores after %d attempts; excluding rollout", max_attempts)
+    return None
 
 
 def aggregate(scored: list[dict]) -> float:

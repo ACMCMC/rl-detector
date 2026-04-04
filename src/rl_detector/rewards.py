@@ -48,12 +48,13 @@ def format_reward(output: str, document: str) -> float:
 
 def calibration_reward(aggregate_score: float, label: int) -> float:
     """
-    +1 if sign of aggregate matches label (1=AI positive, 0=human negative).
-    -1 otherwise.
+    Continuous calibration reward in [0, 1].
+    Label mapping: 1=AI expects positive score, 0=human expects negative score.
+    Uses linear map: (1 + y * a) / 2, where y in {-1, +1}, a in [-1, 1].
     """
-    expected_positive = label == 1
-    actual_positive = aggregate_score > 0
-    return 1.0 if expected_positive == actual_positive else -1.0
+    a = max(-1.0, min(1.0, float(aggregate_score)))
+    y = 1.0 if label == 1 else -1.0
+    return 0.5 * (1.0 + y * a)
 
 
 def compute_reward(
@@ -62,7 +63,7 @@ def compute_reward(
     label: int,
     frozen_scored: list[dict],
 ) -> float:
-    """Combined reward. Format is a gate: if 0, skip calibration."""
+    """Combined reward in [0, 1]. Format is a gate: if 0, skip calibration."""
     if format_reward(output, document) == 0.0:
         return 0.0
     from rl_detector.frozen import aggregate
