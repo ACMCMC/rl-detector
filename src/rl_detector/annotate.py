@@ -165,7 +165,7 @@ async def annotate_with_runtime(document: str, runtime: dict, progress_cb=None) 
         sampling_params=tinker.SamplingParams(
             max_tokens=CFG.sampling.max_tokens,
             temperature=0.0,
-            top_p=CFG.sampling.top_p,
+            top_p=1.0,
             seed=CFG.frozen.seed,
             reasoning_effort=CFG.sampling.reasoning_effort,
         ),

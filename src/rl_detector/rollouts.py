@@ -11,10 +11,12 @@ async def generate_rollouts(
     tokenizer,
     document: str,
     K: int | None = None,
+    seed: int | None = None,
 ) -> list[dict]:
     """
     Generate K rollouts: K/2 directed to find AI tells, K/2 for human tells.
     Returns list of dicts with completion_text, completion_tokens, completion_logprobs.
+    Pass seed for reproducible sampling across runs.
     """
     if K is None:
         K = CFG.training.k
@@ -28,6 +30,7 @@ async def generate_rollouts(
         temperature=CFG.sampling.temperature,
         top_p=CFG.sampling.top_p,
         reasoning_effort=CFG.sampling.reasoning_effort,
+        seed=seed,
     )
     results = []
     for prompt_text in directed_prompts:

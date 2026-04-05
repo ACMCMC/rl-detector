@@ -33,6 +33,8 @@ wandb:
   entity: null               # set to your wandb username or team, or leave null
 
 web:
-  checkpoint_path: "tinker://6f42d0c1-752f-5621-b727-0417ce404053:train:0/weights/best-step-25"      # optional default trained checkpoint path
+  # checkpoint_path: "tinker://6f42d0c1-752f-5621-b727-0417ce404053:train:0/weights/best-step-25"      # optional default trained checkpoint path
+  # checkpoint_path: "tinker://90e0042e-8530-5c84-83a7-7b10ad644879:train:0/sampler_weights/final"      # optional default trained checkpoint path
+  checkpoint_path: "tinker://8410fbd4-6244-5af5-8251-eb091dc2fce4:train:0/sampler_weights/final"      # optional default trained checkpoint path
   host: "127.0.0.1"
   port: 8000

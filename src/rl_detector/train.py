@@ -202,17 +202,44 @@ def build_datum(
     )
 
 
-async def _process_doc(sampling_client, tokenizer, frozen_client, doc):
+async def _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_seed: int | None = None):
     """Process a single doc: generate rollouts, score, compute rewards/advantages, build datums."""
     document = doc["text"]
     label = doc["label"]
     label_str = "AI" if label == 1 else "human"
     snippet = document[:60].replace("\n", " ")
 
-    logger.info("rollouts | generating K=%d for %s doc: %r...", CFG.training.k, label_str, snippet)
-    rollouts = await generate_rollouts(sampling_client, tokenizer, document)
+    # compute neutral tokens up front — needed for re-scoring and datum construction
+    neutral_tokens = tokenizer.encode(
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": neutral(document)}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    )
+    logger.info("rollouts | generating K=%d for %s doc: %r... (seed=%s)", CFG.training.k, label_str, snippet, rollout_seed)
+    rollouts = await generate_rollouts(sampling_client, tokenizer, document, seed=rollout_seed)
     n_tells_per_rollout = [len(parse_indicators(r["completion_text"]) or []) for r in rollouts]
     logger.info("rollouts | done — tells per rollout: %s", n_tells_per_rollout)
+
+    # Re-score each completion under the neutral prompt so that the old logprobs
+    # used for importance sampling match the distribution we actually train on.
+    # The directed-prompt logprobs returned by the sampler are p(tok | directed_ctx),
+    # but the training forward pass computes p(tok | neutral_ctx), so they must agree.
+    async def rescore_under_neutral(r: dict) -> list[float]:
+        full_input = tinker.ModelInput.from_ints(neutral_tokens + r["completion_tokens"])
+        all_lps: list[float | None] = await sampling_client.compute_logprobs_async(full_input)
+        # compute_logprobs returns one value per token; take only the completion slice.
+        # Index N-1 is the logprob of completion_tokens[0] given neutral context.
+        N = len(neutral_tokens)
+        completion_lps = all_lps[N - 1:]
+        return [lp if lp is not None else 0.0 for lp in completion_lps]
+
+    logger.info("rollouts | re-scoring %d completions under neutral prompt", len(rollouts))
+    neutral_logprobs_list = await asyncio.gather(*[rescore_under_neutral(r) for r in rollouts])
+    for r, neutral_lps in zip(rollouts, neutral_logprobs_list):
+        r["completion_logprobs"] = neutral_lps
+    logger.info("rollouts | re-scoring done")
 
     prompt_directions = ["ai"] * (CFG.training.k // 2) + ["human"] * (CFG.training.k // 2)
 
@@ -244,13 +271,6 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc):
     rewards_for_optimization = [rw for rw, use in zip(rewards, used_for_optimization) if use and rw is not None]
     advantages = compute_advantages(rewards_for_optimization) if rewards_for_optimization else []
 
-    neutral_tokens = tokenizer.encode(
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": neutral(document)}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    )
     datums = []
     adv_idx = 0
     for i, r in enumerate(rollouts):
@@ -320,7 +340,10 @@ async def train_step(
 
     logger.info("step %d | processing %d docs", step, len(docs))
     doc_results = await asyncio.gather(
-        *[_process_doc(sampling_client, tokenizer, frozen_client, doc) for doc in docs]
+        *[
+            _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_seed=GLOBAL_SEED + step * 1000 + i)
+            for i, doc in enumerate(docs)
+        ]
     )
 
     all_datums = []
