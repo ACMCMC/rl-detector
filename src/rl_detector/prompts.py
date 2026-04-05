@@ -59,7 +59,7 @@ phrase is evidence of AI generation vs. human authorship:
 
 Use a continuous score in [-1.0, 1.0], not only the anchor values above.
 Prefer nuanced values (for example 0.73, -0.41, 0.08) when evidence is not extreme.
-Write a score for every <tell> tag, even if the evidence is weak. Do not skip any tags.
+Write a custom score for every <tell> tag, even if the evidence is weak. Do not skip any tags.
 
 Output the input text exactly, with score="FLOAT" added to each <tell> tag. \
 Do not change anything else.
