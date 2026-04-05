@@ -36,25 +36,25 @@ body {
   z-index: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(#d9e8f7 1px, transparent 1px),
-    linear-gradient(90deg, #d9e8f7 1px, transparent 1px);
-  background-size: 24px 24px;
+    linear-gradient(#d9e8f7 0.0625rem, transparent 0.0625rem),
+    linear-gradient(90deg, #d9e8f7 0.0625rem, transparent 0.0625rem);
+  background-size: 1.5rem 1.5rem;
 }
 
 .wrap {
   position: relative;
   z-index: 1;
-  max-width: 980px;
+  max-width: 61.25rem;
   margin: 0 auto;
-  padding: 28px 16px 56px;
+  padding: 1.75rem 1rem 3.5rem;
   display: grid;
-  gap: 16px;
+  gap: 1rem;
 }
 
 .hero {
-  border: 1px solid var(--line);
+  border: 0.0625rem solid var(--line);
   background: #ffffff;
-  padding: 18px;
+  padding: 1.125rem;
   animation: rise 360ms ease-out;
 }
 
@@ -63,11 +63,11 @@ body {
   font-family: "IBM Plex Mono", monospace;
   color: var(--blue-medium);
   letter-spacing: 0.08em;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 h1 {
-  margin: 6px 0;
+  margin: 0.375rem 0;
   font-size: clamp(1.4rem, 4vw, 2rem);
   line-height: 1.1;
 }
@@ -79,9 +79,9 @@ h1 {
 }
 
 .panel {
-  border: 1px solid var(--line);
+  border: 0.0625rem solid var(--line);
   background: #ffffff;
-  padding: 16px;
+  padding: 1rem;
   animation: rise 420ms ease-out;
 }
 
@@ -92,24 +92,24 @@ h1 {
 label {
   display: block;
   font-weight: 600;
-  margin-bottom: 8px;
+  margin-bottom: 0.5rem;
 }
 
 textarea,
 input,
 select,
 button {
-  border: 1px solid var(--line);
+  border: 0.0625rem solid var(--line);
   border-radius: 0;
   font-family: inherit;
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 textarea,
 input,
 select {
   width: 100%;
-  padding: 10px;
+  padding: 0.5rem;
   color: var(--ink);
   background: #fcfeff;
 }
@@ -119,19 +119,19 @@ input:focus,
 select:focus,
 button:focus,
 .tell:focus {
-  outline: 2px solid var(--aqua-bright);
-  outline-offset: 1px;
+  outline: 0.125rem solid var(--aqua-bright);
+  outline-offset: 0.0625rem;
 }
 
 .row {
-  margin-top: 10px;
+  margin-top: 0.5rem;
   display: grid;
-  gap: 8px;
+  gap: 1rem;
   grid-template-columns: 1fr auto;
 }
 
 button {
-  padding: 0.625rem 1rem;
+  padding: 0.5rem 1rem;
   font-weight: 600;
   background: var(--blue-medium);
   color: white;
@@ -150,29 +150,29 @@ button:disabled {
 
 #status {
   min-height: 1.2em;
-  margin: 8px 0 0;
+  margin: 0.5rem 0 0;
   color: #1f5b90;
 }
 
 .progress-wrap {
-  margin-top: 10px;
+  margin-top: 0.5rem;
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 8px;
+  gap: 0.5rem;
   align-items: center;
 }
 
 .engine-row {
-  margin-top: 10px;
+  margin-top: 0.5rem;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 .engine-dot {
-  width: 10px;
-  height: 10px;
-  border: 1px solid var(--line);
+  width: 0.625rem;
+  height: 0.625rem;
+  border: 0.0625rem solid var(--line);
   display: inline-block;
 }
 
@@ -185,8 +185,8 @@ button:disabled {
 }
 
 .progress-track {
-  height: 12px;
-  border: 1px solid var(--line);
+  height: 0.75rem;
+  border: 0.0625rem solid var(--line);
   background: #f2f8ff;
 }
 
@@ -199,41 +199,41 @@ button:disabled {
 
 .progress-text {
   margin: 0;
-  min-width: 42px;
+  min-width: 2.625rem;
   text-align: right;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .result-head {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
+  gap: 0.625rem;
+  margin-bottom: 0.75rem;
 }
 
 .label {
   margin: 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: #2f6398;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
 .mono {
-  margin: 2px 0 0;
+  margin: 0.125rem 0 0;
   font-family: "IBM Plex Mono", monospace;
 }
 
 .small {
-  font-size: 12px;
+  font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
 
 .annotated {
-  border: 1px solid var(--line);
+  border: 0.0625rem solid var(--line);
   background: #fbfeff;
-  padding: 12px;
-  min-height: 100px;
+  padding: 0.75rem;
+  min-height: 6.25rem;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -245,7 +245,7 @@ button:disabled {
   line-height: inherit;
   background: var(--tell-bg);
   color: var(--blue-deep);
-  border: 1px solid var(--aqua-bright);
+  border: 0.0625rem solid var(--aqua-bright);
   padding: 0;
   box-decoration-break: clone;
 }
@@ -269,16 +269,16 @@ button:disabled {
   position: absolute;
   left: 0;
   bottom: 120%;
-  min-width: 220px;
-  max-width: 320px;
-  border: 1px solid var(--line);
+  min-width: 13.75rem;
+  max-width: 20rem;
+  border: 0.0625rem solid var(--line);
   background: #ffffff;
   color: var(--ink);
   font-family: "IBM Plex Mono", monospace;
-  font-size: 12px;
-  padding: 8px;
+  font-size: 0.75rem;
+  padding: 0.5rem;
   visibility: hidden;
-  transform: translateY(4px);
+  transform: translateY(0.25rem);
   pointer-events: none;
   transition: transform 120ms ease;
 }
@@ -293,11 +293,11 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  padding: 4px 2px 0;
+  gap: 0.75rem;
+  padding: 0.25rem 0.125rem 0;
   color: #234b82;
   font-family: "IBM Plex Mono", monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .footer a {
@@ -311,14 +311,14 @@ button:disabled {
 
 @keyframes rise {
   from {
-    transform: translateY(6px);
+    transform: translateY(0.375rem);
   }
   to {
     transform: translateY(0);
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 47.5rem) {
   .row {
     grid-template-columns: 1fr;
   }
@@ -328,8 +328,8 @@ button:disabled {
   }
 
   .tell-tip {
-    min-width: 180px;
-    max-width: 260px;
+    min-width: 11.25rem;
+    max-width: 16.25rem;
   }
 
   .footer {

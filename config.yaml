@@ -11,7 +11,7 @@ training:
   docs_per_step: 8           # documents per GRPO step (half AI, half human)
   learning_rate: 2.0e-5
   max_steps: 100
-  checkpoint_every: 50       # save Tinker checkpoint every N steps
+  checkpoint_every: 5        # save Tinker checkpoint every N steps
   audit_log_path: "audit_log.jsonl"
 
 sampling:
@@ -33,6 +33,6 @@ wandb:
   entity: null               # set to your wandb username or team, or leave null
 
 web:
-  checkpoint_path: "tinker://737fe03b-1aa3-53a6-a6e3-422783d16d79:train:0/weights/final"      # optional default trained checkpoint path
+  checkpoint_path: "tinker://6f42d0c1-752f-5621-b727-0417ce404053:train:0/weights/best-step-45"      # optional default trained checkpoint path
   host: "127.0.0.1"
   port: 8000
