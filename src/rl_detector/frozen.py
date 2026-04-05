@@ -1,10 +1,12 @@
-"""Frozen model scoring via DeepInfra (OpenAI-compatible API)."""
+"""Frozen model scoring via DeepInfra or Google AI Studio (Gemini)."""
 
 import asyncio
 import logging
 import os
 import re
 
+from google import genai
+from google.genai import types as genai_types
 from openai import AsyncOpenAI
 
 from rl_detector.config import CFG
@@ -50,6 +52,82 @@ def get_client() -> AsyncOpenAI:
     )
 
 
+def get_gemini_client() -> genai.Client:
+    return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+
+def _reasoning_effort_to_thinking_level(effort: str) -> str:
+    return {"low": "LOW", "medium": "MEDIUM", "high": "HIGH"}.get(effort.lower(), "LOW")
+
+
+async def _rank_indicators_gemini(
+    tagged_text: str,
+    indicators: list[dict],
+) -> list[dict] | None:
+    """Gemini backend for rank_indicators."""
+    n = len(indicators)
+    max_attempts = 3
+    prompt = FROZEN_SCORE_PROMPT.format(tagged_text=tagged_text)
+    client = get_gemini_client()
+    thinking_level = _reasoning_effort_to_thinking_level(CFG.frozen.reasoning_effort)
+
+    sem = _semaphore()
+    for attempt in range(1, max_attempts + 1):
+        async with sem:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=CFG.frozen.gemini_model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[genai_types.Part.from_text(text=prompt)],
+                        )
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        thinking_config=genai_types.ThinkingConfig(thinking_budget=-1),
+                        max_output_tokens=CFG.frozen.max_tokens,
+                    ),
+                ),
+            )
+        content = response.text or ""
+        logger.debug("gemini frozen model raw response: %r", content)
+
+        scored_tells = _extract_scored_tells(content)
+        if len(scored_tells) != n:
+            logger.warning(
+                "gemini frozen score parse failed: found %d <tell> tags, expected %d (attempt %d/%d)",
+                len(scored_tells), n, attempt, max_attempts,
+            )
+            continue
+
+        score_pool: dict[tuple[str, str], list[float]] = {}
+        try:
+            for tell in scored_tells:
+                raw = tell.get("score_raw")
+                if raw is None:
+                    raise ValueError("missing score attribute in <tell> tag")
+                key = (tell["span_text"], tell["explanation"])
+                score_pool.setdefault(key, []).append(max(-1.0, min(1.0, float(raw))))
+
+            scores: list[float] = []
+            for ind in indicators:
+                key = (ind["span_text"], ind.get("explanation", ""))
+                bucket = score_pool.get(key)
+                if not bucket:
+                    raise ValueError(f"missing scored tell for span/explanation: {key}")
+                scores.append(bucket.pop(0))
+        except ValueError as e:
+            logger.warning("gemini frozen score parse error: %s (attempt %d/%d)", e, attempt, max_attempts)
+            continue
+
+        return [{"score": s} for s in scores]
+
+    logger.warning("gemini frozen model failed to produce valid scores after %d attempts; excluding rollout", max_attempts)
+    return None
+
+
 async def rank_indicators(
     client: AsyncOpenAI,
     tagged_text: str,
@@ -62,6 +140,9 @@ async def rank_indicators(
     """
     if not indicators:
         return []
+
+    if getattr(CFG.frozen, "provider", "deepinfra") == "gemini":
+        return await _rank_indicators_gemini(tagged_text, indicators)
 
     n = len(indicators)
     max_attempts = 3

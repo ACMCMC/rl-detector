@@ -56,6 +56,7 @@ class _JobLogHandler(logging.Handler):
 
 
 _jobs: dict[str, dict] = {}
+_result_cache: dict[str, dict] = {}   # text -> finished result, for slow-response fallback
 _startup_runtime: dict | None = None
 _startup_checkpoint: str | None = None
 _engine_status: str = "not_configured"
@@ -114,6 +115,9 @@ def _segments_from_indicators(text: str, indicators: list[dict]) -> list[dict]:
     return result
 
 
+_CACHE_TIMEOUT_S = 10
+
+
 async def _run_job(job_id: str, text: str, checkpoint: str) -> None:
     job = _jobs[job_id]
     handler = _JobLogHandler(job)
@@ -131,9 +135,30 @@ async def _run_job(job_id: str, text: str, checkpoint: str) -> None:
             job["progress_stage"] = stage
 
         job["logs"].append("webui | using preloaded startup sampler")
-        result = await annotate_with_runtime(text, _startup_runtime, progress_cb=on_progress)
+        use_cache = getattr(getattr(CFG, "web", None), "result_cache", True)
+        inference_task = asyncio.create_task(
+            annotate_with_runtime(text, _startup_runtime, progress_cb=on_progress)
+        )
+        if use_cache:
+            done, _ = await asyncio.wait({inference_task}, timeout=_CACHE_TIMEOUT_S)
+            if not done:
+                cached = _result_cache.get(text)
+                if cached is not None:
+                    inference_task.cancel()
+                    job["logs"].append(f"webui | inference timed out after {_CACHE_TIMEOUT_S}s, returning cached result")
+                    result = cached
+                else:
+                    job["logs"].append(f"webui | inference took >{_CACHE_TIMEOUT_S}s, no cache — waiting for completion")
+                    result = await inference_task
+            else:
+                result = inference_task.result()
+        else:
+            result = await inference_task
+
         result["segments"] = _segments_from_indicators(text, result["indicators"])
         result["used_checkpoint"] = checkpoint
+        if use_cache:
+            _result_cache[text] = result
         job["result"] = result
         job["status"] = "done"
         job["progress_pct"] = 100

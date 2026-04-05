@@ -6,7 +6,7 @@ Rules:
 - Annotate any notable "tells" that indicate AI generation or human authorship
 - Wrap each notable tell with <tell explanation="EXPLANATION">TEXT</tell> tags
 - EXPLANATION is a short comment explaining why we think this is a tell
-- Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative and holistic in identifying tells, using your full knowledge of AI and human writing styles.
+- Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative and holistic in identifying tells, using your full knowledge of AI and human writing styles. Aim to have different types of tells with varied explanations.
 - Keep tells as short as possible, the MINIMUM span of text that supports the explanation
 - Take a stance. Based on whether you believe the text is AI or human, choose how to guide the annotation. However, you should still include around 10-25% (as appropriate) of the opposite type of tells to keep the annotation balanced and informative.
 - Don't use a predetermined number of tells. Instead, use your judgment to identify where tells occur in the text, which may be dense or sparse. Some documents may have many tells, others may have few or none.

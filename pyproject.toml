@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
     "tinker",
     "openai>=1.0",
+    "google-genai",
     "datasets",
     "torch",
     "transformers",

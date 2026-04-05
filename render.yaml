@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: rl-detector
+    runtime: python
+    buildCommand: pip install -e .
+    startCommand: uvicorn rl_detector.webui.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEEPINFRA_API_KEY
+        sync: false          # set manually in Render dashboard
+      - key: GEMINI_API_KEY
+        sync: false          # set manually in Render dashboard
