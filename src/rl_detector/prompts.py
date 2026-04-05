@@ -10,6 +10,7 @@ Rules:
 - Be creative and holistic in identifying tells, using your full knowledge of AI and human writing styles
 - Keep tells as short as possible, the MINIMUM span of text that supports the explanation
 - Take a stance. Based on the general vibe of the text, choose how to guide the annotation. However, you should still include at least 20% of the opposite type of tells to keep the annotation balanced and informative.
+- Don't use a predetermined number of tells. Instead, use your judgment to identify as many or as few tells as needed to support the stance you took, while still including some of the opposite type of tells for balance.
 - Do NOT add, remove, or alter any other characters in the text
 - Do NOT include any text before or after the annotated text
 - Output the original text verbatim, with the appropriate <tell> tags added around notable phrases"""
@@ -58,6 +59,7 @@ phrase is evidence of AI generation vs. human authorship:
 
 Use a continuous score in [-1.0, 1.0], not only the anchor values above.
 Prefer nuanced values (for example 0.73, -0.41, 0.08) when evidence is not extreme.
+Write a score for every <tell> tag, even if the evidence is weak. Do not skip any tags.
 
 Output the input text exactly, with score="FLOAT" added to each <tell> tag. \
 Do not change anything else.

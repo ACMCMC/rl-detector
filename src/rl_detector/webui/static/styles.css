@@ -131,7 +131,7 @@ button:focus,
 }
 
 button {
-  padding: 0 18px;
+  padding: 0.625rem 1rem;
   font-weight: 600;
   background: var(--blue-medium);
   color: white;
