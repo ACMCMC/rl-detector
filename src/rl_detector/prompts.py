@@ -8,7 +8,7 @@ Rules:
 - EXPLANATION is a short comment explaining why we think this is a tell
 - Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative and holistic in identifying tells, using your full knowledge of AI and human writing styles.
 - Keep tells as short as possible, the MINIMUM span of text that supports the explanation
-- Take a stance. Based on whether you believe the text is AI or human, choose how to guide the annotation. However, you should still include 10% or more of the opposite type of tells to keep the annotation balanced and informative.
+- Take a stance. Based on whether you believe the text is AI or human, choose how to guide the annotation. However, you should still include around 10-25% (as appropriate) of the opposite type of tells to keep the annotation balanced and informative.
 - Don't use a predetermined number of tells. Instead, use your judgment to identify where tells occur in the text, which may be dense or sparse. Some documents may have many tells, others may have few or none.
 - Do NOT add, remove, or alter any other characters in the text
 - Do NOT include any text before or after the annotated text

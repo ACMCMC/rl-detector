@@ -230,9 +230,9 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_s
         full_input = tinker.ModelInput.from_ints(neutral_tokens + r["completion_tokens"])
         all_lps: list[float | None] = await sampling_client.compute_logprobs_async(full_input)
         # compute_logprobs returns one value per token; take only the completion slice.
-        # Index N-1 is the logprob of completion_tokens[0] given neutral context.
+        # completion_tokens[0] sits at index N in the full sequence, so its logprob is all_lps[N].
         N = len(neutral_tokens)
-        completion_lps = all_lps[N - 1:]
+        completion_lps = all_lps[N:]
         return [lp if lp is not None else 0.0 for lp in completion_lps]
 
     logger.info("rollouts | re-scoring %d completions under neutral prompt", len(rollouts))
