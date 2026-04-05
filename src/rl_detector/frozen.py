@@ -15,6 +15,26 @@ logger = logging.getLogger(__name__)
 # global semaphore shared across all docs and rollouts
 _SEMAPHORE: asyncio.Semaphore | None = None
 
+_TELL_TAG_RE = re.compile(r"<tell\b([^>]*)>(.*?)</tell>", re.DOTALL)
+_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*\"([^\"]*)\"")
+
+
+def _extract_scored_tells(text: str) -> list[dict]:
+    """Parse full <tell> tags and extract explanation/span/score as raw strings."""
+    tells: list[dict] = []
+    for m in _TELL_TAG_RE.finditer(text):
+        attrs_blob = m.group(1)
+        span = m.group(2)
+        attrs = {k: v for k, v in _ATTR_RE.findall(attrs_blob)}
+        tells.append(
+            {
+                "span_text": span,
+                "explanation": attrs.get("explanation", ""),
+                "score_raw": attrs.get("score"),
+            }
+        )
+    return tells
+
 
 def _semaphore() -> asyncio.Semaphore:
     global _SEMAPHORE
@@ -70,6 +90,7 @@ async def rank_indicators(
             response = await client.chat.completions.create(
                 model=CFG.frozen.model,
                 messages=[{"role": "user", "content": prompt}],
+                seed=CFG.frozen.seed,
                 temperature=0.0,
                 max_tokens=CFG.frozen.max_tokens,
                 reasoning_effort=CFG.frozen.reasoning_effort,
@@ -78,19 +99,34 @@ async def rank_indicators(
         content = response.choices[0].message.content or ""
         logger.debug("frozen model raw response: %r", content)
 
-        raw_scores = re.findall(r'<tell\b[^>]*\bscore="([^"]+)"', content)
-        if len(raw_scores) != n:
+        scored_tells = _extract_scored_tells(content)
+        if len(scored_tells) != n:
             logger.warning(
-                "frozen model score parse failed: found %d score= attrs, expected %d (attempt %d/%d)",
-                len(raw_scores),
+                "frozen model score parse failed: found %d <tell> tags, expected %d (attempt %d/%d)",
+                len(scored_tells),
                 n,
                 attempt,
                 max_attempts,
             )
             continue
 
+        # match on the original tag identity (span + explanation), tolerate reordered tags
+        score_pool: dict[tuple[str, str], list[float]] = {}
         try:
-            scores = [max(-1.0, min(1.0, float(s))) for s in raw_scores]
+            for tell in scored_tells:
+                raw = tell.get("score_raw")
+                if raw is None:
+                    raise ValueError("missing score attribute in <tell> tag")
+                key = (tell["span_text"], tell["explanation"])
+                score_pool.setdefault(key, []).append(max(-1.0, min(1.0, float(raw))))
+
+            scores: list[float] = []
+            for ind in indicators:
+                key = (ind["span_text"], ind.get("explanation", ""))
+                bucket = score_pool.get(key)
+                if not bucket:
+                    raise ValueError(f"missing scored tell for span/explanation: {key}")
+                scores.append(bucket.pop(0))
         except ValueError as e:
             logger.warning(
                 "frozen model score parse error: %s (attempt %d/%d)",

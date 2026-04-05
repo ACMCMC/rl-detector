@@ -21,6 +21,7 @@ sampling:
 
 frozen:
   model: "openai/gpt-oss-120b"
+  seed: 2262
   max_concurrent: 32         # max parallel DeepInfra requests
   max_tokens: 8192
   reasoning_effort: "low"
@@ -29,3 +30,8 @@ wandb:
   enabled: true
   project: "rl-detector"
   entity: null               # set to your wandb username or team, or leave null
+
+web:
+  checkpoint_path: "tinker://0a04f84f-8e17-5af3-b9b3-716788d7ceca:train:0/sampler_weights/final"      # optional default trained checkpoint path
+  host: "127.0.0.1"
+  port: 8000

@@ -91,6 +91,7 @@ async def _sample_standard_rollout(sampling_client, tokenizer, document: str) ->
         num_samples=1,
         sampling_params=tinker.SamplingParams(
             max_tokens=CFG.sampling.max_tokens,
+            seed=EVAL_SEED,
             temperature=CFG.sampling.temperature,
             top_p=CFG.sampling.top_p,
         ),
@@ -140,8 +141,8 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
     eval_tpr_at_fpr_001 = 0.0
     if len(agg_scores) >= 2:
         fpr, tpr, _ = roc_curve(true_labels, agg_scores)
-        idx_at_fpr = min(range(len(fpr)), key=lambda i: abs(fpr[i] - 0.01))
-        eval_tpr_at_fpr_001 = tpr[idx_at_fpr]
+        tpr_at_or_below = [tpr_i for fpr_i, tpr_i in zip(fpr, tpr) if fpr_i <= 0.01]
+        eval_tpr_at_fpr_001 = max(tpr_at_or_below) if tpr_at_or_below else 0.0
 
     logger.info(
         "eval | step %s | reward=%.3f format=%.2f auroc=%.3f tpr@fpr01=%.3f excluded=%d",

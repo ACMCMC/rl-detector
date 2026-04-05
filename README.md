@@ -121,6 +121,29 @@ Output is a JSON object with:
 
 ---
 
+## Web UI demo
+
+There is a minimal web app in `src/rl_detector/webui/` that reuses the same `annotate()` pipeline. No scoring or parsing logic is duplicated in the UI layer.
+
+Install deps, then run:
+
+```bash
+uv sync
+uv run uvicorn rl_detector.webui.app:app --reload
+```
+
+Open `http://127.0.0.1:8000`.
+
+Checkpoint loading order:
+
+1. `checkpoint_path` sent from the UI request
+2. `RL_DETECTOR_CHECKPOINT` env var
+3. `config.yaml` -> `web.checkpoint_path`
+
+If no checkpoint is set, the API returns an error and asks for one.
+
+---
+
 ## Module reference
 
 ### `data.py`
