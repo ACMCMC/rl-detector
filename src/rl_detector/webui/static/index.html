@@ -17,9 +17,9 @@
     <main class="wrap">
       <header class="hero">
         <p class="kicker">RL DETECTOR</p>
-        <h1>Explainable AI Text Check</h1>
+        <h1>AI Text Highlight Demo</h1>
         <p class="subtitle">
-          Paste text, run the trained checkpoint, and inspect highlighted tells with short explanations.
+          Paste text, run the trained checkpoint, and see the model mark AI leaning and human leaning phrases directly in the text.
         </p>
       </header>
 
@@ -64,10 +64,31 @@
         <article id="annotatedText" class="annotated" aria-label="Annotated text"></article>
       </section>
 
-      <section class="panel" aria-label="Indicators">
-        <h2>Contextual explanations</h2>
-        <ul id="indicators" class="indicator-list"></ul>
+      <section class="panel info-panel" aria-label="How it works">
+        <h2>How this works</h2>
+        <p>
+          I trained this model to mark the text itself, instead of giving one classifier score, because I wanted to see the actual signals that make text look AI written or human written.
+          For example, phrases like "moreover", "in conclusion", or very polished transition language can lean AI, while first person slips, rough phrasing, or awkward edits can lean human.
+          The model has to find those tells on its own, and I keep the result on the text so the evidence is visible.
+        </p>
+        <p>
+          I used GRPO because I wanted the model to learn from groups of rollouts on the same document, not from a single fixed answer.
+          That helps the model compare different attempts, which is useful when one rollout finds a real AI tell and another one finds something weak or irrelevant.
+          I also enforce diversity by using different prompt templates, like AI-directed and human-directed variants, so the model sees multiple angles and does not collapse into one style of explanation.
+          The goal is that the LLM identifies the AI and human tells on its own, not that I hand it a fixed detector rule.
+        </p>
+        <p>
+          Separating tell generation from scoring is also important, because it reduces reward hacking.
+          If the same model both invents the reason and assigns the score, it can cheat by writing flattering explanations for weak spans.
+          By separating the two steps, the model proposes spans and reasons, and a separate scorer judges how convincing they are.
+          That makes the system closer to an evidence finder than a standard classifier, and I think that is more useful when the goal is to explain what looks AI-like or human-like in the text.
+        </p>
       </section>
+
+      <footer class="footer">
+        <a href="https://acmc.fyi" target="_blank" rel="noreferrer">Aldan Creo</a>
+        <span>Copyright 2026</span>
+      </footer>
     </main>
 
     <template id="tellTpl">

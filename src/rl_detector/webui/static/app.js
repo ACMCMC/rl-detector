@@ -10,7 +10,6 @@ const els = {
   score: document.getElementById("score"),
   checkpointUsed: document.getElementById("checkpointUsed"),
   annotatedText: document.getElementById("annotatedText"),
-  indicators: document.getElementById("indicators"),
   tellTpl: document.getElementById("tellTpl"),
 };
 
@@ -24,13 +23,13 @@ let progressStageName = "Queued";
 let progressStageStartedAt = 0;
 
 const stagePlan = {
-  Queued: { start: 0, end: 5, durationMs: 2500 },
-  "Starting pipeline": { start: 5, end: 30, durationMs: 4500 },
-  "Preparing prompt": { start: 30, end: 45, durationMs: 6000 },
-  "Sampling one rollout": { start: 45, end: 65, durationMs: 22000 },
-  "Parsed indicators": { start: 65, end: 80, durationMs: 4500 },
-  "Scoring indicators": { start: 80, end: 98, durationMs: 18000 },
-  Complete: { start: 98, end: 100, durationMs: 1200 },
+  Queued: { start: 0, end: 5, durationMs: 7500 },
+  "Starting pipeline": { start: 5, end: 30, durationMs: 13500 },
+  "Preparing prompt": { start: 30, end: 45, durationMs: 18000 },
+  "Sampling one rollout": { start: 45, end: 65, durationMs: 66000 },
+  "Parsed indicators": { start: 65, end: 80, durationMs: 13500 },
+  "Scoring indicators": { start: 80, end: 98, durationMs: 54000 },
+  Complete: { start: 98, end: 100, durationMs: 3600 },
   Failed: { start: 0, end: 100, durationMs: 1 },
 };
 
@@ -105,26 +104,10 @@ function renderSegments(segments) {
     node.querySelector(".tell-text").textContent = seg.text;
     const why = seg.explanation || "No explanation provided.";
     const lean = leaningLabel(Number(seg.score) || 0);
-    node.querySelector(".tell-tip").textContent = `${lean}: ${why}`;
-    node.setAttribute("aria-label", `Highlighted tell: ${seg.text}. ${lean}. ${why}`);
+    const scoreText = Number(seg.score).toFixed(2);
+    node.querySelector(".tell-tip").textContent = `${lean} | score ${scoreText}: ${why}`;
+    node.setAttribute("aria-label", `Highlighted tell: ${seg.text}. ${lean}. score ${scoreText}. ${why}`);
     els.annotatedText.append(node);
-  }
-}
-
-function renderIndicators(indicators) {
-  els.indicators.innerHTML = "";
-  if (!indicators || indicators.length === 0) {
-    const li = document.createElement("li");
-    li.textContent = "No indicators were extracted.";
-    els.indicators.append(li);
-    return;
-  }
-
-  for (const ind of indicators) {
-    const li = document.createElement("li");
-    const score = Number(ind.frozen_score ?? 0).toFixed(2);
-    li.textContent = `(${score}) "${ind.span_text}" -> ${ind.explanation}`;
-    els.indicators.append(li);
   }
 }
 
@@ -235,7 +218,6 @@ async function runAnalysis() {
       els.score.textContent = Number(out.aggregate_score).toFixed(3);
       els.checkpointUsed.textContent = out.used_checkpoint || "-";
       renderSegments(out.segments || []);
-      renderIndicators(out.indicators || []);
       const total = Math.floor((Date.now() - t0) / 1000);
       setProgress(100);
       stopProgressAnimation();

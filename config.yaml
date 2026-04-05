@@ -10,7 +10,7 @@ training:
   k: 8                       # rollouts per document (K/2 AI-directed, K/2 human-directed)
   docs_per_step: 8           # documents per GRPO step (half AI, half human)
   learning_rate: 2.0e-5
-  max_steps: 25
+  max_steps: 100
   checkpoint_every: 50       # save Tinker checkpoint every N steps
   audit_log_path: "audit_log.jsonl"
 
@@ -18,6 +18,7 @@ sampling:
   max_tokens: 8192
   temperature: 1.0
   top_p: 0.95
+  reasoning_effort: "low"
 
 frozen:
   model: "openai/gpt-oss-120b"
@@ -32,6 +33,6 @@ wandb:
   entity: null               # set to your wandb username or team, or leave null
 
 web:
-  checkpoint_path: "tinker://0a04f84f-8e17-5af3-b9b3-716788d7ceca:train:0/sampler_weights/final"      # optional default trained checkpoint path
+  checkpoint_path: "tinker://737fe03b-1aa3-53a6-a6e3-422783d16d79:train:0/weights/final"      # optional default trained checkpoint path
   host: "127.0.0.1"
   port: 8000

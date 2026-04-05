@@ -94,6 +94,7 @@ async def _sample_standard_rollout(sampling_client, tokenizer, document: str) ->
             seed=EVAL_SEED,
             temperature=CFG.sampling.temperature,
             top_p=CFG.sampling.top_p,
+            reasoning_effort=CFG.sampling.reasoning_effort,
         ),
     )
     seq = sampled.sequences[0]

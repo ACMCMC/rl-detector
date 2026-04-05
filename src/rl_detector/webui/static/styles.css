@@ -85,6 +85,10 @@ h1 {
   animation: rise 420ms ease-out;
 }
 
+.info-panel {
+  border-color: var(--blue-medium);
+}
+
 label {
   display: block;
   font-weight: 600;
@@ -127,7 +131,7 @@ button:focus,
 }
 
 button {
-  padding: 0 14px;
+  padding: 0 18px;
   font-weight: 600;
   background: var(--blue-medium);
   color: white;
@@ -237,16 +241,13 @@ button:disabled {
 .tell {
   position: relative;
   display: inline;
+  white-space: normal;
   line-height: inherit;
   background: var(--tell-bg);
   color: var(--blue-deep);
   border: 1px solid var(--aqua-bright);
   padding: 0;
   box-decoration-break: clone;
-}
-
-.tell-text {
-  white-space: pre-wrap;
 }
 
 .tell[data-score-sign="pos"] {
@@ -288,19 +289,24 @@ button:disabled {
   transform: translateY(0);
 }
 
-.indicator-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 2px 0;
+  color: #234b82;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 12px;
 }
 
-.indicator-list li {
-  border: 1px solid var(--line);
-  padding: 8px;
-  background: #fbfeff;
-  font-size: 14px;
+.footer a {
+  color: var(--blue-medium);
+  text-decoration: none;
+}
+
+.footer a:hover {
+  text-decoration: underline;
 }
 
 @keyframes rise {
@@ -324,5 +330,10 @@ button:disabled {
   .tell-tip {
     min-width: 180px;
     max-width: 260px;
+  }
+
+  .footer {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }

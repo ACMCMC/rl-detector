@@ -6,7 +6,9 @@ Rules:
 - Annotate any notable "tells" that indicate AI generation or human authorship
 - Wrap each notable tell with <tell explanation="EXPLANATION">TEXT</tell> tags
 - EXPLANATION a short sentence explaining why we think this is a tell
-- Keep tells as short as possible, the minimum span of text that supports the explanation
+- Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment
+- Be creative and holistic in identifying tells, using your full knowledge of AI and human writing styles
+- Keep tells as short as possible, the MINIMUM span of text that supports the explanation
 - Take a stance. Based on the general vibe of the text, choose how to guide the annotation. However, you should still include at least 20% of the opposite type of tells to keep the annotation balanced and informative.
 - Do NOT add, remove, or alter any other characters in the text
 - Do NOT include any text before or after the annotated text
@@ -50,11 +52,12 @@ Text:
 FROZEN_SCORE_PROMPT = """\
 Add a score="FLOAT" attribute inside each <tell> tag. The score rates how strongly the \
 phrase is evidence of AI generation vs. human authorship:
-  +1.0 = strong AI signal
-  +0.5 = moderate AI signal
-   0.0 = ambiguous
-  -0.5 = moderate human signal
-  -1.0 = strong human signal
+    +1.0 = strongest AI signal
+     0.0 = ambiguous / mixed signal
+    -1.0 = strongest human signal
+
+Use a continuous score in [-1.0, 1.0], not only the anchor values above.
+Prefer nuanced values (for example 0.73, -0.41, 0.08) when evidence is not extreme.
 
 Output the input text exactly, with score="FLOAT" added to each <tell> tag. \
 Do not change anything else.
@@ -63,7 +66,7 @@ Example input:
 <tell explanation="formal transition common in AI">Furthermore</tell>, it <tell explanation="hedged academic phrasing">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion">felt devastated</tell>. <tell explanation="AI assistant sign-off">Would you like me to continue?</tell>
 
 Example output:
-<tell explanation="formal transition common in AI" score="0.6">Furthermore</tell>, it <tell explanation="hedged academic phrasing" score="-0.2">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion" score="-0.6">felt devastated</tell>. <tell explanation="AI assistant sign-off" score="1.0">Would you like me to continue?</tell>
+<tell explanation="formal transition common in AI" score="0.64">Furthermore</tell>, it <tell explanation="hedged academic phrasing" score="0.17">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion" score="-0.58">felt devastated</tell>. <tell explanation="AI assistant sign-off" score="0.93">Would you like me to continue?</tell>
 
 Input:
 {tagged_text}"""

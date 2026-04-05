@@ -78,10 +78,30 @@ async def create_runtime(checkpoint_path: str | None = None) -> dict:
             retry_path = checkpoint_path.replace("/weights/", "/sampler_weights/")
             if "sampler_weights" in msg and retry_path != checkpoint_path:
                 logger.info("runtime | retrying sampling client with sampler_weights path")
-                sampling_client = await _await_with_heartbeat(
-                    service_client.create_sampling_client_async(model_path=retry_path),
-                    phase="create_sampling_client_async(model_path=sampler_weights)",
-                )
+                try:
+                    sampling_client = await _await_with_heartbeat(
+                        service_client.create_sampling_client_async(model_path=retry_path),
+                        phase="create_sampling_client_async(model_path=sampler_weights)",
+                    )
+                except tinker.NotFoundError:
+                    logger.info("runtime | sampler_weights missing after retry, generating from training weights")
+                    weights_path = retry_path.replace("/sampler_weights/", "/weights/")
+                    training_client = await _await_with_heartbeat(
+                        service_client.create_training_client_from_state_async(path=weights_path),
+                        phase="create_training_client_from_state_async(for_sampler_generation)",
+                    )
+                    ckpt_name = retry_path.rsplit("/", 1)[-1]
+                    save_future = await training_client.save_weights_for_sampler_async(name=ckpt_name, ttl_seconds=None)
+                    save_resp = await _await_with_heartbeat(
+                        save_future.result_async(),
+                        phase="save_weights_for_sampler_async.result_async",
+                    )
+                    generated_path = getattr(save_resp, "path", None) or retry_path
+                    logger.info("runtime | generated sampler_weights path: %s", generated_path)
+                    sampling_client = await _await_with_heartbeat(
+                        service_client.create_sampling_client_async(model_path=generated_path),
+                        phase="create_sampling_client_async(model_path=generated_sampler)",
+                    )
             else:
                 raise
         except tinker.NotFoundError as e:
@@ -147,6 +167,7 @@ async def annotate_with_runtime(document: str, runtime: dict, progress_cb=None) 
             temperature=0.0,
             top_p=CFG.sampling.top_p,
             seed=CFG.frozen.seed,
+            reasoning_effort=CFG.sampling.reasoning_effort,
         ),
     )
     output = tokenizer.decode(sampled.sequences[0].tokens)

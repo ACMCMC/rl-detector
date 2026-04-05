@@ -27,6 +27,7 @@ async def generate_rollouts(
         max_tokens=CFG.sampling.max_tokens,
         temperature=CFG.sampling.temperature,
         top_p=CFG.sampling.top_p,
+        reasoning_effort=CFG.sampling.reasoning_effort,
     )
     results = []
     for prompt_text in directed_prompts:
