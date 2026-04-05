@@ -14,7 +14,6 @@ import wandb
 import weave
 from dotenv import load_dotenv
 from tinker import TensorData
-from tinker_cookbook import weights
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -30,9 +29,11 @@ logger = logging.getLogger(__name__)
 
 # expose BASE_MODEL for annotate.py
 BASE_MODEL = CFG.model.base_model
-EVAL_SAMPLE_SIZE = 10
+EVAL_SAMPLE_SIZE = 25
 EVAL_EVERY_STEPS = 5
 EVAL_SEED = 2262
+GLOBAL_SEED = 2262
+SAVE_TTL_SECONDS = 2 * 24 * 60 * 60
 
 
 def _p95(values: list[int]) -> int:
@@ -53,6 +54,11 @@ async def _await_with_heartbeat(coro, step: int, phase: str, every_s: int = 20):
             return await task
         waited_s += every_s
         logger.info("step %d | still waiting on %s (%ds elapsed)", step, phase, waited_s)
+
+
+async def _save_state_with_ttl(training_client, name: str) -> str:
+    save_future = await training_client.save_state_async(name=name, ttl_seconds=SAVE_TTL_SECONDS)
+    return await save_future.result_async()
 
 
 def _select_eval_docs(docs: list[dict], sample_size: int = EVAL_SAMPLE_SIZE, seed: int = EVAL_SEED) -> list[dict]:
@@ -95,6 +101,7 @@ async def _sample_standard_rollout(sampling_client, tokenizer, document: str) ->
         completion_logprobs = list(seq.logprobs)
     else:
         completion_logprobs = [0.0] * len(completion_tokens)
+    assert any(lp != 0.0 for lp in completion_logprobs), "completion_logprobs are all 0.0"
     return {
         "completion_text": tokenizer.decode(completion_tokens),
         "completion_tokens": completion_tokens,
@@ -408,6 +415,13 @@ async def train_step(
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    # single seed for reproducible startup and training behavior
+    os.environ["PYTHONHASHSEED"] = str(GLOBAL_SEED)
+    random.seed(GLOBAL_SEED)
+    torch.manual_seed(GLOBAL_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(GLOBAL_SEED)
+
     if CFG.wandb.enabled:
         wandb.init(
             project=CFG.wandb.project,
@@ -446,6 +460,7 @@ async def main():
         service_client.create_lora_training_client_async(
             base_model=CFG.model.base_model,
             rank=CFG.model.lora_rank,
+            seed=GLOBAL_SEED,
         ),
         loop.run_in_executor(None, _load_tokenizer),
         loop.run_in_executor(None, _load_dataset),
@@ -457,11 +472,22 @@ async def main():
 
     frozen_client = get_client()
     step = 0
+    best_eval_auroc = float("-inf")
+    best_eval_path = None
     with open(CFG.training.audit_log_path, "w") as audit_log:
         if eval_docs:
             eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
             if CFG.wandb.enabled:
-                wandb.log(eval_metrics, step=step)
+                wandb.log({
+                    (f"eval/{k[len('eval_'):]}" if k.startswith("eval_") else k): v
+                    for k, v in eval_metrics.items()
+                }, step=step)
+            if eval_metrics["eval_auroc"] > best_eval_auroc:
+                best_eval_auroc = eval_metrics["eval_auroc"]
+                best_eval_path = await _save_state_with_ttl(training_client, name=f"best-step-{step}")
+                logger.info("Saved new best eval checkpoint at step %d: %s", step, best_eval_path)
+                if CFG.wandb.enabled:
+                    wandb.log({"eval/best_auroc": best_eval_auroc}, step=step)
 
         steps_iter = iter_balanced_steps(all_docs, docs_per_step=CFG.training.docs_per_step)
         pbar = tqdm(total=CFG.training.max_steps, desc="training", unit="step")
@@ -475,12 +501,12 @@ async def main():
 
             if CFG.wandb.enabled:
                 wandb.log({
-                    "train_reward_mean": metrics["train_reward_mean"],
-                    "train_format_rate": metrics["train_format_rate"],
-                    "train_n_positive_rollouts": metrics["train_n_positive"],
-                    "train_n_negative_rollouts": metrics["train_n_negative"],
-                    "train_n_zero_rollouts": metrics["train_n_zero"],
-                    "train_n_excluded_rollouts": metrics["train_n_excluded_rollouts"],
+                    "train/reward_mean": metrics["train_reward_mean"],
+                    "train/format_rate": metrics["train_format_rate"],
+                    "train/n_positive_rollouts": metrics["train_n_positive"],
+                    "train/n_negative_rollouts": metrics["train_n_negative"],
+                    "train/n_zero_rollouts": metrics["train_n_zero"],
+                    "train/n_excluded_rollouts": metrics["train_n_excluded_rollouts"],
                 }, step=step)
 
             logger.info(
@@ -494,14 +520,23 @@ async def main():
             if step % EVAL_EVERY_STEPS == 0 and eval_docs:
                 eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
                 if CFG.wandb.enabled:
-                    wandb.log(eval_metrics, step=step)
+                    wandb.log({
+                        (f"eval/{k[len('eval_'):]}" if k.startswith("eval_") else k): v
+                        for k, v in eval_metrics.items()
+                    }, step=step)
+                if eval_metrics["eval_auroc"] > best_eval_auroc:
+                    best_eval_auroc = eval_metrics["eval_auroc"]
+                    best_eval_path = await _save_state_with_ttl(training_client, name=f"best-step-{step}")
+                    logger.info("Saved new best eval checkpoint at step %d: %s", step, best_eval_path)
+                    if CFG.wandb.enabled:
+                        wandb.log({"eval/best_auroc": best_eval_auroc}, step=step)
 
             if step >= CFG.training.max_steps:
                 logger.info("Reached max_steps, stopping.")
                 break
 
             if CFG.training.checkpoint_every > 0 and step % CFG.training.checkpoint_every == 0:
-                save_future = await training_client.save_state_async(name=f"step-{step}")
+                save_future = await training_client.save_state_async(name=f"step-{step}", ttl_seconds=SAVE_TTL_SECONDS)
                 await save_future.result_async()
                 logger.info(f"Saved checkpoint at step {step}")
                 if CFG.wandb.enabled:
@@ -509,37 +544,12 @@ async def main():
 
         pbar.close()
 
-    logger.info("training complete | saving final checkpoint and downloading model")
-    final_save = await training_client.save_state_async(name="final")
+    logger.info("training complete | saving final checkpoint")
+    final_save = await training_client.save_state_async(name="final", ttl_seconds=SAVE_TTL_SECONDS)
     final_path = await final_save.result_async()
     logger.info(f"final checkpoint saved: {final_path}")
-
-    adapter_dir = weights.download(
-        tinker_path=final_path,
-        output_dir="./tinker-rl-detector-adapter",
-    )
-    logger.info(f"model adapter downloaded to: {adapter_dir}")
-
-    if eval_docs:
-        logger.info("running final evaluation on downloaded model")
-        final_training_client = await service_client.create_training_client_from_state_async(
-            checkpoint_path=adapter_dir
-        )
-        final_eval_metrics = await _evaluate_model(final_training_client, tokenizer, frozen_client, eval_docs, "final")
-        logger.info(
-            f"final eval | train_reward={final_eval_metrics['eval_reward_mean']:.3f} "
-            f"train_format={final_eval_metrics['eval_format_rate']:.2f} "
-            f"auroc={final_eval_metrics['eval_auroc']:.3f} "
-            f"tpr@fpr01={final_eval_metrics['eval_tpr_at_fpr_001']:.3f}"
-        )
-        if CFG.wandb.enabled:
-            wandb.log({
-                "final_eval_reward_mean": final_eval_metrics["eval_reward_mean"],
-                "final_eval_format_rate": final_eval_metrics["eval_format_rate"],
-                "final_eval_auroc": final_eval_metrics["eval_auroc"],
-                "final_eval_tpr_at_fpr_001": final_eval_metrics["eval_tpr_at_fpr_001"],
-                "final_eval_n_excluded_rollouts": final_eval_metrics["eval_n_excluded_rollouts"],
-            })
+    if best_eval_path is not None:
+        logger.info("best eval checkpoint kept at: %s", best_eval_path)
 
     if CFG.wandb.enabled:
         wandb.finish()

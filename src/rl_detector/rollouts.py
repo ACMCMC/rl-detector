@@ -49,6 +49,7 @@ async def generate_rollouts(
             else:
                 # avoid extra API call cost; zeros keep tensor shapes valid
                 completion_logprobs = [0.0] * len(completion_tokens)
+            assert any(lp != 0.0 for lp in completion_logprobs), "completion_logprobs are all 0.0"
             completion_text = tokenizer.decode(completion_tokens)
             results.append({
                 "completion_text": completion_text,
