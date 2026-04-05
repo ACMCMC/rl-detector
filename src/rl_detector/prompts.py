@@ -3,10 +3,11 @@
 INSTRUCTIONS = """\
 Rules:
 - Reproduce the ENTIRE text exactly as given, word for word, with no changes
+- Annotate any notable "tells" that indicate AI generation or human authorship
 - Wrap each notable tell with <tell explanation="EXPLANATION">TEXT</tell> tags
-- EXPLANATION is one sentence describing why this phrase is a tell
+- EXPLANATION a short sentence explaining why we think this is a tell
 - Keep tells as short as possible, the minimum span of text that supports the explanation
-- Keep tells balanced, providing evidence for both AI generation and human authorship where applicable
+- Take a stance. Based on the general vibe of the text, choose how to guide the annotation. However, you should still include at least 20% of the opposite type of tells to keep the annotation balanced and informative.
 - Do NOT add, remove, or alter any other characters in the text
 - Do NOT include any text before or after the annotated text
 - Output the original text verbatim, with the appropriate <tell> tags added around notable phrases"""
@@ -16,7 +17,7 @@ def directed_ai(text: str) -> str:
     return f"""\
 You are an expert in identifying AI-generated text.
 
-You believe that this text is AI-generated.
+You believe this text is AI-generated.
 
 {INSTRUCTIONS}
 
@@ -28,7 +29,7 @@ def directed_human(text: str) -> str:
     return f"""\
 You are an expert in identifying human-written text.
 
-You believe that this text is human-written.
+You believe this text is human-written.
 
 {INSTRUCTIONS}
 
