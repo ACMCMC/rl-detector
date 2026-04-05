@@ -49,22 +49,20 @@ Text:
 FROZEN_SCORE_PROMPT = """\
 Add a score="FLOAT" attribute inside each <tell> tag. The score rates how strongly the \
 phrase is evidence of AI generation vs. human authorship:
-  +1.0 = extremely strong AI signal (very rare)
+  +1.0 = strong AI signal
   +0.5 = moderate AI signal
    0.0 = ambiguous
   -0.5 = moderate human signal
-  -1.0 = extremely strong human signal (very rare)
-
-Most scores should fall between -0.7 and +0.7.
+  -1.0 = strong human signal
 
 Output the input text exactly, with score="FLOAT" added to each <tell> tag. \
 Do not change anything else.
 
 Example input:
-The <tell explanation="formal transition common in AI">furthermore</tell>, it <tell explanation="hedged academic phrasing">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion">felt devastated</tell>.
+<tell explanation="formal transition common in AI">Furthermore</tell>, it <tell explanation="hedged academic phrasing">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion">felt devastated</tell>. <tell explanation="AI assistant sign-off">Would you like me to continue?</tell>
 
 Example output:
-The <tell explanation="formal transition common in AI" score="0.6">furthermore</tell>, it <tell explanation="hedged academic phrasing" score="-0.2">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion" score="-0.6">felt devastated</tell>.
+<tell explanation="formal transition common in AI" score="0.6">Furthermore</tell>, it <tell explanation="hedged academic phrasing" score="-0.2">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion" score="-0.6">felt devastated</tell>. <tell explanation="AI assistant sign-off" score="1.0">Would you like me to continue?</tell>
 
 Input:
 {tagged_text}"""

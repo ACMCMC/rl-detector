@@ -8,11 +8,13 @@ import random
 import time
 
 import tinker
+from sklearn.metrics import roc_auc_score, roc_curve
 import torch
 import wandb
 import weave
 from dotenv import load_dotenv
 from tinker import TensorData
+from tinker_cookbook import weights
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -100,8 +102,8 @@ async def _sample_standard_rollout(sampling_client, tokenizer, document: str) ->
     }
 
 
-async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: list[dict], step: int) -> dict:
-    logger.info("eval | step %d | evaluating %d test docs with neutral prompt", step, len(eval_docs))
+async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: list[dict], step: int | str) -> dict:
+    logger.info("eval | step %s | evaluating %d test docs with neutral prompt", step, len(eval_docs))
     sampling_client = await training_client.save_weights_and_get_sampling_client_async()
 
     async def score_eval_doc(doc):
@@ -109,26 +111,38 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
         indicators = parse_indicators(rollout["completion_text"]) or []
         format_ok = format_reward(rollout["completion_text"], doc["text"]) == 1.0
         if not format_ok:
-            return 0.0, True, False, None
+            return 0.0, True, False, None, None, doc["label"]
         frozen_scored = await rank_indicators(frozen_client, rollout["completion_text"], indicators) if indicators else []
         if indicators and frozen_scored is None:
-            return None, False, True, "frozen_parse_failed"
+            return None, False, True, "frozen_parse_failed", None, doc["label"]
         reward = compute_reward(rollout["completion_text"], doc["text"], doc["label"], frozen_scored)
-        return reward, True, True, None
+        agg_score = sum(s["score"] for s in frozen_scored) / len(frozen_scored) if frozen_scored else 0.0
+        return reward, True, True, None, agg_score, doc["label"]
 
     results = await asyncio.gather(*[score_eval_doc(doc) for doc in eval_docs])
     rewards = [0.0 if res[0] is None else res[0] for res in results if res[1]]
     format_ok_flags = [res[2] for res in results if res[1]]
     n_excluded = sum(1 for res in results if not res[1])
+    agg_scores = [res[4] for res in results if res[1] and res[4] is not None]
+    true_labels = [res[5] for res in results if res[1] and res[4] is not None]
 
     eval_reward_mean = (sum(rewards) / len(rewards)) if rewards else 0.0
     eval_format_rate = (sum(1 for ok in format_ok_flags if ok) / len(format_ok_flags)) if format_ok_flags else 0.0
 
+    eval_auroc = roc_auc_score(true_labels, agg_scores) if len(agg_scores) >= 2 else 0.0
+    eval_tpr_at_fpr_001 = 0.0
+    if len(agg_scores) >= 2:
+        fpr, tpr, _ = roc_curve(true_labels, agg_scores)
+        idx_at_fpr = min(range(len(fpr)), key=lambda i: abs(fpr[i] - 0.01))
+        eval_tpr_at_fpr_001 = tpr[idx_at_fpr]
+
     logger.info(
-        "eval | step %d | reward=%.3f format=%.2f excluded=%d",
+        "eval | step %s | reward=%.3f format=%.2f auroc=%.3f tpr@fpr01=%.3f excluded=%d",
         step,
         eval_reward_mean,
         eval_format_rate,
+        eval_auroc,
+        eval_tpr_at_fpr_001,
         n_excluded,
     )
 
@@ -136,6 +150,8 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
         "eval_reward_mean": eval_reward_mean,
         "eval_format_rate": eval_format_rate,
         "eval_n_excluded_rollouts": n_excluded,
+        "eval_auroc": eval_auroc,
+        "eval_tpr_at_fpr_001": eval_tpr_at_fpr_001,
     }
 
 
@@ -492,6 +508,38 @@ async def main():
                     wandb.log({"checkpoint": step}, step=step)
 
         pbar.close()
+
+    logger.info("training complete | saving final checkpoint and downloading model")
+    final_save = await training_client.save_state_async(name="final")
+    final_path = await final_save.result_async()
+    logger.info(f"final checkpoint saved: {final_path}")
+
+    adapter_dir = weights.download(
+        tinker_path=final_path,
+        output_dir="./tinker-rl-detector-adapter",
+    )
+    logger.info(f"model adapter downloaded to: {adapter_dir}")
+
+    if eval_docs:
+        logger.info("running final evaluation on downloaded model")
+        final_training_client = await service_client.create_training_client_from_state_async(
+            checkpoint_path=adapter_dir
+        )
+        final_eval_metrics = await _evaluate_model(final_training_client, tokenizer, frozen_client, eval_docs, "final")
+        logger.info(
+            f"final eval | train_reward={final_eval_metrics['eval_reward_mean']:.3f} "
+            f"train_format={final_eval_metrics['eval_format_rate']:.2f} "
+            f"auroc={final_eval_metrics['eval_auroc']:.3f} "
+            f"tpr@fpr01={final_eval_metrics['eval_tpr_at_fpr_001']:.3f}"
+        )
+        if CFG.wandb.enabled:
+            wandb.log({
+                "final_eval_reward_mean": final_eval_metrics["eval_reward_mean"],
+                "final_eval_format_rate": final_eval_metrics["eval_format_rate"],
+                "final_eval_auroc": final_eval_metrics["eval_auroc"],
+                "final_eval_tpr_at_fpr_001": final_eval_metrics["eval_tpr_at_fpr_001"],
+                "final_eval_n_excluded_rollouts": final_eval_metrics["eval_n_excluded_rollouts"],
+            })
 
     if CFG.wandb.enabled:
         wandb.finish()

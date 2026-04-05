@@ -13,6 +13,8 @@ dependencies = [
     "tqdm",
     "wandb",
     "weave>=0.52.36",
+    "scikit-learn",
+    "tinker-cookbook",
 ]
 
 [build-system]
