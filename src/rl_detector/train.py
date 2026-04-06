@@ -20,7 +20,7 @@ from transformers import AutoTokenizer
 from rl_detector.config import CFG
 from rl_detector.data import iter_balanced_steps, load_docs
 from rl_detector.frozen import get_client, rank_indicators
-from rl_detector.prompts import directed_ai, directed_human, neutral
+from rl_detector.prompts import neutral
 from rl_detector.rewards import compute_advantages, compute_reward, format_reward, parse_indicators
 from rl_detector.rollouts import generate_rollouts
 
@@ -202,8 +202,12 @@ def build_datum(
     )
 
 
-async def _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_seed: int | None = None):
-    """Process a single doc: generate rollouts, score, compute rewards/advantages, build datums."""
+async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs: list[dict], rng: random.Random, rollout_seed: int | None = None):
+    """Process a single doc: generate rollouts, score, compute rewards/advantages, build datums.
+
+    Teacher rollouts use a contrastive prompt (main doc + a labeled contrast doc of opposite label).
+    Student optimization uses the neutral prompt (main doc only). The IS correction bridges the two.
+    """
     document = doc["text"]
     label = doc["label"]
     label_str = "AI" if label == 1 else "human"
@@ -217,10 +221,22 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_s
             add_generation_prompt=True,
         )
     )
+
+    # sample K contrast docs of opposite label (teacher privileged context, one per rollout)
+    opposite_label = 1 - label
+    contrast_pool = [d for d in all_docs if d["label"] == opposite_label and d is not doc]
+    if len(contrast_pool) < CFG.training.k:
+        logger.warning("rollouts | contrast pool too small (%d), sampling with replacement", len(contrast_pool))
+        contrast_docs = rng.choices(contrast_pool, k=CFG.training.k)
+    else:
+        contrast_docs = rng.sample(contrast_pool, k=CFG.training.k)
+
     logger.info("rollouts | generating K=%d for %s doc: %r... (seed=%s)", CFG.training.k, label_str, snippet, rollout_seed)
-    rollouts = await generate_rollouts(sampling_client, tokenizer, document, seed=rollout_seed)
+    t0_rollouts = time.perf_counter()
+    rollouts = await generate_rollouts(sampling_client, tokenizer, document, contrast_docs=contrast_docs, seed=rollout_seed)
+    dt_rollouts = time.perf_counter() - t0_rollouts
     n_tells_per_rollout = [len(parse_indicators(r["completion_text"]) or []) for r in rollouts]
-    logger.info("rollouts | done — tells per rollout: %s", n_tells_per_rollout)
+    logger.info("rollouts | done in %.1fs — tells per rollout: %s", dt_rollouts, n_tells_per_rollout)
 
     # Re-score each completion under the neutral prompt so that the old logprobs
     # used for importance sampling match the distribution we actually train on.
@@ -236,37 +252,48 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_s
         return [lp if lp is not None else 0.0 for lp in completion_lps]
 
     logger.info("rollouts | re-scoring %d completions under neutral prompt", len(rollouts))
+    t0_rescore = time.perf_counter()
     neutral_logprobs_list = await asyncio.gather(*[rescore_under_neutral(r) for r in rollouts])
+    dt_rescore = time.perf_counter() - t0_rescore
     for r, neutral_lps in zip(rollouts, neutral_logprobs_list):
         r["completion_logprobs"] = neutral_lps
-    logger.info("rollouts | re-scoring done")
-
-    prompt_directions = ["ai"] * (CFG.training.k // 2) + ["human"] * (CFG.training.k // 2)
+    logger.info("rollouts | re-scoring done in %.1fs", dt_rescore)
 
     async def score_and_reward(i, r):
         indicators = parse_indicators(r["completion_text"]) or []
         format_ok = format_reward(r["completion_text"], document) == 1.0
-        logger.info("scoring  | rollout %d/%d (%s-directed): %d tells", i + 1, CFG.training.k, prompt_directions[i], len(indicators))
+        contrast_label_str = "AI" if r["contrast_label"] == 1 else "human"
+        logger.info("scoring  | rollout %d/%d (contrast=%s): %d tells", i + 1, CFG.training.k, contrast_label_str, len(indicators))
         if not format_ok:
             logger.info("scoring  | rollout %d/%d format invalid, reward=0 and skip frozen scoring", i + 1, CFG.training.k)
-            return indicators, [], 0.0, True, None, False
+            return indicators, [], 0.0, True, None, False, 0.0
+        t0_frozen = time.perf_counter()
         frozen_scored = await rank_indicators(frozen_client, r["completion_text"], indicators) if indicators else []
+        dt_frozen = time.perf_counter() - t0_frozen
         if indicators and frozen_scored is None:
             logger.warning("scoring  | rollout %d/%d excluded: frozen score parse failed after retries", i + 1, CFG.training.k)
-            return indicators, [], None, False, "frozen_parse_failed", True
+            return indicators, [], None, False, "frozen_parse_failed", True, dt_frozen
         reward = compute_reward(r["completion_text"], document, label, frozen_scored)
         agg = sum(s["score"] for s in frozen_scored) / len(frozen_scored) if frozen_scored else 0.0
-        logger.info("scoring  | rollout %d/%d done — agg=%.3f reward=%.1f", i + 1, CFG.training.k, agg, reward)
-        return indicators, frozen_scored, reward, True, None, True
+        logger.info("scoring  | rollout %d/%d done in %.1fs — agg=%.3f reward=%.1f", i + 1, CFG.training.k, dt_frozen, agg, reward)
+        return indicators, frozen_scored, reward, True, None, True, dt_frozen
 
     logger.info("scoring  | sending %d rollouts to frozen model", len(rollouts))
+    t0_scoring = time.perf_counter()
     results = await asyncio.gather(*[score_and_reward(i, r) for i, r in enumerate(rollouts)])
+    dt_scoring = time.perf_counter() - t0_scoring
     all_indicators = [res[0] for res in results]
     all_frozen_scored = [res[1] for res in results]
     rewards = [res[2] for res in results]
     used_for_optimization = [res[3] for res in results]
     exclude_reasons = [res[4] for res in results]
     format_ok_flags = [res[5] for res in results]
+    frozen_times = [res[6] for res in results]
+    dt_frozen_mean = sum(frozen_times) / len(frozen_times) if frozen_times else 0.0
+    logger.info(
+        "timing   | doc=%r rollouts=%.1fs rescore=%.1fs scoring=%.1fs (frozen mean/rollout=%.1fs)",
+        snippet, dt_rollouts, dt_rescore, dt_scoring, dt_frozen_mean,
+    )
 
     rewards_for_optimization = [rw for rw, use in zip(rewards, used_for_optimization) if use and rw is not None]
     advantages = compute_advantages(rewards_for_optimization) if rewards_for_optimization else []
@@ -292,16 +319,22 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_s
     format_used = [fmt for fmt, use in zip(format_ok_flags, used_for_optimization) if use]
     format_rate = (sum(1 for fmt in format_used if fmt) / len(format_used)) if format_used else 0.0
 
+    contrast_labels_used = [r["contrast_label"] for r in rollouts]
+    assert all(cl != label for cl in contrast_labels_used), (
+        f"contrast doc has same label as main doc (label={label}): {contrast_labels_used}"
+    )
+
     doc_audit = {
         "document": document,
         "label": label,
+        "contrast_labels": contrast_labels_used,
         "reward_mean": reward_mean,
         "format_rate": format_rate,
         "n_excluded_rollouts": sum(1 for use in used_for_optimization if not use),
         "rollouts": [
             {
                 "index": i,
-                "prompt_direction": prompt_directions[i],
+                "contrast_label": r["contrast_label"],
                 "used_for_optimization": used_for_optimization[i],
                 "exclude_reason": exclude_reasons[i],
                 "format_ok": format_ok_flags[i],
@@ -331,17 +364,26 @@ async def train_step(
     tokenizer,
     frozen_client,
     docs: list[dict],
+    all_docs: list[dict],
     step: int,
     audit_log,
 ) -> dict:
     """One GRPO update for a batch of docs. Returns aggregate metrics."""
     logger.info("step %d | saving weights and getting sampling client", step)
+    t0_save = time.perf_counter()
     sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+    dt_save = time.perf_counter() - t0_save
+    logger.info("step %d | sampling client ready in %.1fs", step, dt_save)
 
     logger.info("step %d | processing %d docs", step, len(docs))
     doc_results = await asyncio.gather(
         *[
-            _process_doc(sampling_client, tokenizer, frozen_client, doc, rollout_seed=GLOBAL_SEED + step * 1000 + i)
+            _process_doc(
+                sampling_client, tokenizer, frozen_client, doc,
+                all_docs=all_docs,
+                rng=random.Random(GLOBAL_SEED + step * 1000 + i),
+                rollout_seed=GLOBAL_SEED + step * 1000 + i,
+            )
             for i, doc in enumerate(docs)
         ]
     )
@@ -405,13 +447,21 @@ async def train_step(
         step,
         "optimizer result",
     )
-    logger.info("step %d | optimizer done in %.1fs", step, time.perf_counter() - opt_t0)
+    opt_dt = time.perf_counter() - opt_t0
+    logger.info("step %d | optimizer done in %.1fs", step, opt_dt)
 
     all_rewards = [ro["reward"] for da in docs_audit for ro in da["rollouts"] if ro.get("used_for_optimization") and ro["reward"] is not None]
     reward_mean = (sum(all_rewards) / len(all_rewards)) if all_rewards else 0.0
     all_format_ok = [ro.get("format_ok", False) for da in docs_audit for ro in da["rollouts"] if ro.get("used_for_optimization")]
     format_rate = (sum(1 for ok in all_format_ok if ok) / len(all_format_ok)) if all_format_ok else 0.0
     n_excluded_rollouts = sum(1 for da in docs_audit for ro in da["rollouts"] if not ro.get("used_for_optimization"))
+
+    all_tell_scores = [ind["frozen_score"] for da in docs_audit for ro in da["rollouts"] for ind in ro.get("indicators", [])]
+    tell_score_mean = (sum(all_tell_scores) / len(all_tell_scores)) if all_tell_scores else 0.0
+    tell_score_std = (
+        (sum((s - tell_score_mean) ** 2 for s in all_tell_scores) / len(all_tell_scores)) ** 0.5
+        if all_tell_scores else 0.0
+    )
 
     # per-rollout reward breakdown for wandb
     n_positive = sum(1 for rw in all_rewards if rw > 0)
@@ -427,6 +477,12 @@ async def train_step(
     audit_log.write(json.dumps(audit_entry) + "\n")
     audit_log.flush()
 
+    step_total_dt = dt_save + fb_dt + opt_dt  # excludes doc processing (runs in parallel)
+    logger.info(
+        "timing   | step %d: save_weights=%.1fs fwd_bwd=%.1fs optim=%.1fs | step_total=%.1fs",
+        step, dt_save, fb_dt, opt_dt, step_total_dt,
+    )
+
     return {
         "train_reward_mean": reward_mean,
         "train_format_rate": format_rate,
@@ -434,6 +490,11 @@ async def train_step(
         "train_n_negative": n_negative,
         "train_n_zero": n_zero,
         "train_n_excluded_rollouts": n_excluded_rollouts,
+        "train_tell_score_mean": tell_score_mean,
+        "train_tell_score_std": tell_score_std,
+        "timing_save_weights_s": dt_save,
+        "timing_fwd_bwd_s": fb_dt,
+        "timing_optim_s": opt_dt,
     }
 
 
@@ -517,7 +578,7 @@ async def main():
         steps_iter = iter_balanced_steps(all_docs, docs_per_step=CFG.training.docs_per_step)
         pbar = tqdm(total=CFG.training.max_steps, desc="training", unit="step")
         for docs in steps_iter:
-            metrics = await train_step(training_client, tokenizer, frozen_client, docs, step, audit_log)
+            metrics = await train_step(training_client, tokenizer, frozen_client, docs, all_docs=all_docs, step=step, audit_log=audit_log)
             pbar.set_postfix(
                 train_reward=f"{metrics['train_reward_mean']:.3f}",
                 train_format=f"{metrics['train_format_rate']:.2f}",
@@ -532,6 +593,11 @@ async def main():
                     "train/n_negative_rollouts": metrics["train_n_negative"],
                     "train/n_zero_rollouts": metrics["train_n_zero"],
                     "train/n_excluded_rollouts": metrics["train_n_excluded_rollouts"],
+                    "train/tell_score_mean": metrics["train_tell_score_mean"],
+                    "train/tell_score_std": metrics["train_tell_score_std"],
+                    "timing/save_weights_s": metrics["timing_save_weights_s"],
+                    "timing/fwd_bwd_s": metrics["timing_fwd_bwd_s"],
+                    "timing/optim_s": metrics["timing_optim_s"],
                 }, step=step)
 
             logger.info(

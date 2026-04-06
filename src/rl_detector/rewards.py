@@ -1,6 +1,11 @@
 """Reward functions and advantage computation for GRPO."""
 
+import math
 import re
+
+# Weight of the granularity bonus relative to the calibration reward.
+# Small enough that getting the classification right always dominates.
+_GRANULARITY_WEIGHT = 0.05
 
 
 def _extract_final_channel(text: str) -> str:
@@ -57,18 +62,35 @@ def calibration_reward(aggregate_score: float, label: int) -> float:
     return 0.5 * (1.0 + y * a)
 
 
+def granularity_reward(n_tells: int) -> float:
+    """
+    Small bonus in [0, 1] for spreading evidence across many short tells.
+    Uses log growth so the benefit of going from 1->2 tells is larger than 4->5.
+    Saturates around 5+ tells (log(6)/log(6) = 1.0).
+    """
+    if n_tells <= 0:
+        return 0.0
+    return min(1.0, math.log(n_tells + 1) / math.log(6))
+
+
 def compute_reward(
     output: str,
     document: str,
     label: int,
     frozen_scored: list[dict],
 ) -> float:
-    """Combined reward in [0, 1]. Format is a gate: if 0, skip calibration."""
+    """
+    Combined reward. Format is a gate: if 0, return 0.
+    Main signal: calibration (classification correctness).
+    Minor signal: granularity bonus for many short tells over one long tell.
+    """
     if format_reward(output, document) == 0.0:
         return 0.0
     from rl_detector.frozen import aggregate
     agg = aggregate(frozen_scored)
-    return calibration_reward(agg, label)
+    cal = calibration_reward(agg, label)
+    gran = granularity_reward(len(frozen_scored))
+    return cal + _GRANULARITY_WEIGHT * gran
 
 
 def compute_advantages(rewards: list[float]) -> list[float]:
