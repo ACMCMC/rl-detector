@@ -40,7 +40,7 @@ web:
   # checkpoint_path: "tinker://8410fbd4-6244-5af5-8251-eb091dc2fce4:train:0/sampler_weights/final"      # optional default trained checkpoint path
   # checkpoint_path: "tinker://994fa569-56fa-54a1-9950-73e41c8a549b:train:0/sampler_weights/step-5"      # optional default trained checkpoint path
   # checkpoint_path: "tinker://d444eee2-7ebe-5af9-aaa4-b1789b7bf988:train:0/sampler_weights/best-step-10"      # optional default trained checkpoint path
-  checkpoint_path: "tinker://d29972b8-ad49-5f0a-895d-65512dda0525:train:0/weights/best-step-15"      # optional default trained checkpoint path
+  checkpoint_path: "tinker://0240407a-761b-5116-aa7c-340e3725ecbd:train:0/sampler_weights/best-step-15"      # optional default trained checkpoint path
   host: "127.0.0.1"
   port: 8000
   result_cache: true

@@ -44,6 +44,15 @@ def _p95(values: list[int]) -> int:
     return ordered[idx]
 
 
+def _quantile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    qq = max(0.0, min(1.0, q))
+    idx = int(qq * (len(ordered) - 1))
+    return ordered[idx]
+
+
 async def _await_with_heartbeat(coro, step: int, phase: str, every_s: int = 20):
     # keep emitting liveness logs while waiting on remote async work
     task = asyncio.create_task(coro)
@@ -145,6 +154,15 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
         tpr_at_or_below = [tpr_i for fpr_i, tpr_i in zip(fpr, tpr) if fpr_i <= 0.01]
         eval_tpr_at_fpr_001 = max(tpr_at_or_below) if tpr_at_or_below else 0.0
 
+    eval_ai_scores = [s for s, y in zip(agg_scores, true_labels) if y == 1]
+    eval_human_scores = [s for s, y in zip(agg_scores, true_labels) if y == 0]
+    eval_ai_score_mean = (sum(eval_ai_scores) / len(eval_ai_scores)) if eval_ai_scores else 0.0
+    eval_human_score_mean = (sum(eval_human_scores) / len(eval_human_scores)) if eval_human_scores else 0.0
+    eval_score_gap_ai_minus_human = eval_ai_score_mean - eval_human_score_mean
+    eval_ai_positive_rate = (sum(1 for s in eval_ai_scores if s > 0.0) / len(eval_ai_scores)) if eval_ai_scores else 0.0
+    eval_human_negative_rate = (sum(1 for s in eval_human_scores if s < 0.0) / len(eval_human_scores)) if eval_human_scores else 0.0
+    eval_ambiguous_rate = (sum(1 for s in agg_scores if abs(s) < 0.2) / len(agg_scores)) if agg_scores else 0.0
+
     logger.info(
         "eval | step %s | reward=%.3f format=%.2f auroc=%.3f tpr@fpr01=%.3f excluded=%d",
         step,
@@ -161,6 +179,20 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
         "eval_n_excluded_rollouts": n_excluded,
         "eval_auroc": eval_auroc,
         "eval_tpr_at_fpr_001": eval_tpr_at_fpr_001,
+        "eval_ai_score_mean": eval_ai_score_mean,
+        "eval_human_score_mean": eval_human_score_mean,
+        "eval_score_gap_ai_minus_human": eval_score_gap_ai_minus_human,
+        "eval_ai_positive_rate": eval_ai_positive_rate,
+        "eval_human_negative_rate": eval_human_negative_rate,
+        "eval_ambiguous_rate_abs_lt_02": eval_ambiguous_rate,
+        "eval_ai_score_p10": _quantile(eval_ai_scores, 0.10),
+        "eval_ai_score_p50": _quantile(eval_ai_scores, 0.50),
+        "eval_ai_score_p90": _quantile(eval_ai_scores, 0.90),
+        "eval_human_score_p10": _quantile(eval_human_scores, 0.10),
+        "eval_human_score_p50": _quantile(eval_human_scores, 0.50),
+        "eval_human_score_p90": _quantile(eval_human_scores, 0.90),
+        "_eval_ai_scores": eval_ai_scores,
+        "_eval_human_scores": eval_human_scores,
     }
 
 
@@ -474,6 +506,15 @@ async def train_step(
     human_tell_scores = [ind["frozen_score"] for da in docs_audit if da["label"] == 0 for ro in da["rollouts"] for ind in ro.get("indicators", [])]
     ai_tell_score_mean = (sum(ai_tell_scores) / len(ai_tell_scores)) if ai_tell_scores else 0.0
     human_tell_score_mean = (sum(human_tell_scores) / len(human_tell_scores)) if human_tell_scores else 0.0
+    tell_score_gap_ai_minus_human = ai_tell_score_mean - human_tell_score_mean
+    ai_positive_rate = (sum(1 for s in ai_tell_scores if s > 0.0) / len(ai_tell_scores)) if ai_tell_scores else 0.0
+    human_negative_rate = (sum(1 for s in human_tell_scores if s < 0.0) / len(human_tell_scores)) if human_tell_scores else 0.0
+    ambiguous_rate = (sum(1 for s in all_tell_scores if abs(s) < 0.2) / len(all_tell_scores)) if all_tell_scores else 0.0
+
+    type_ai_scores = [ind["frozen_score"] for da in docs_audit for ro in da["rollouts"] for ind in ro.get("indicators", []) if ind.get("type") == "AI"]
+    type_human_scores = [ind["frozen_score"] for da in docs_audit for ro in da["rollouts"] for ind in ro.get("indicators", []) if ind.get("type") == "human"]
+    type_ai_score_mean = (sum(type_ai_scores) / len(type_ai_scores)) if type_ai_scores else 0.0
+    type_human_score_mean = (sum(type_human_scores) / len(type_human_scores)) if type_human_scores else 0.0
 
     # per-rollout reward breakdown for wandb
     n_positive = sum(1 for rw in all_rewards if rw > 0)
@@ -508,6 +549,20 @@ async def train_step(
         "train_human_reward_mean": human_reward_mean,
         "train_ai_tell_score_mean": ai_tell_score_mean,
         "train_human_tell_score_mean": human_tell_score_mean,
+        "train_tell_score_gap_ai_minus_human": tell_score_gap_ai_minus_human,
+        "train_ai_positive_rate": ai_positive_rate,
+        "train_human_negative_rate": human_negative_rate,
+        "train_ambiguous_rate_abs_lt_02": ambiguous_rate,
+        "train_ai_tell_score_p10": _quantile(ai_tell_scores, 0.10),
+        "train_ai_tell_score_p50": _quantile(ai_tell_scores, 0.50),
+        "train_ai_tell_score_p90": _quantile(ai_tell_scores, 0.90),
+        "train_human_tell_score_p10": _quantile(human_tell_scores, 0.10),
+        "train_human_tell_score_p50": _quantile(human_tell_scores, 0.50),
+        "train_human_tell_score_p90": _quantile(human_tell_scores, 0.90),
+        "train_type_ai_score_mean": type_ai_score_mean,
+        "train_type_human_score_mean": type_human_score_mean,
+        "_train_ai_tell_scores": ai_tell_scores,
+        "_train_human_tell_scores": human_tell_scores,
         "timing_save_weights_s": dt_save,
         "timing_fwd_bwd_s": fb_dt,
         "timing_optim_s": opt_dt,
@@ -580,10 +635,16 @@ async def main():
         if eval_docs:
             eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
             if CFG.wandb.enabled:
-                wandb.log({
+                eval_log_data = {
                     (f"eval/{k[len('eval_'):]}" if k.startswith("eval_") else k): v
                     for k, v in eval_metrics.items()
-                }, step=step)
+                    if not k.startswith("_")
+                }
+                if eval_metrics.get("_eval_ai_scores"):
+                    eval_log_data["eval/hist_ai_scores"] = wandb.Histogram(eval_metrics["_eval_ai_scores"])
+                if eval_metrics.get("_eval_human_scores"):
+                    eval_log_data["eval/hist_human_scores"] = wandb.Histogram(eval_metrics["_eval_human_scores"])
+                wandb.log(eval_log_data, step=step)
             if eval_metrics["eval_auroc"] > best_eval_auroc:
                 best_eval_auroc = eval_metrics["eval_auroc"]
                 best_eval_path = await _save_state_with_ttl(training_client, name=f"best-step-{step}")
@@ -602,7 +663,7 @@ async def main():
             pbar.update(1)
 
             if CFG.wandb.enabled:
-                wandb.log({
+                train_log_data = {
                     "train/reward_mean": metrics["train_reward_mean"],
                     "train/format_rate": metrics["train_format_rate"],
                     "train/n_positive_rollouts": metrics["train_n_positive"],
@@ -615,10 +676,27 @@ async def main():
                     "train/human_reward_mean": metrics["train_human_reward_mean"],
                     "train/ai_tell_score_mean": metrics["train_ai_tell_score_mean"],
                     "train/human_tell_score_mean": metrics["train_human_tell_score_mean"],
+                    "train/tell_score_gap_ai_minus_human": metrics["train_tell_score_gap_ai_minus_human"],
+                    "train/ai_positive_rate": metrics["train_ai_positive_rate"],
+                    "train/human_negative_rate": metrics["train_human_negative_rate"],
+                    "train/ambiguous_rate_abs_lt_02": metrics["train_ambiguous_rate_abs_lt_02"],
+                    "train/ai_tell_score_p10": metrics["train_ai_tell_score_p10"],
+                    "train/ai_tell_score_p50": metrics["train_ai_tell_score_p50"],
+                    "train/ai_tell_score_p90": metrics["train_ai_tell_score_p90"],
+                    "train/human_tell_score_p10": metrics["train_human_tell_score_p10"],
+                    "train/human_tell_score_p50": metrics["train_human_tell_score_p50"],
+                    "train/human_tell_score_p90": metrics["train_human_tell_score_p90"],
+                    "train/type_ai_score_mean": metrics["train_type_ai_score_mean"],
+                    "train/type_human_score_mean": metrics["train_type_human_score_mean"],
                     "timing/save_weights_s": metrics["timing_save_weights_s"],
                     "timing/fwd_bwd_s": metrics["timing_fwd_bwd_s"],
                     "timing/optim_s": metrics["timing_optim_s"],
-                }, step=step)
+                }
+                if metrics.get("_train_ai_tell_scores"):
+                    train_log_data["train/hist_ai_tell_scores"] = wandb.Histogram(metrics["_train_ai_tell_scores"])
+                if metrics.get("_train_human_tell_scores"):
+                    train_log_data["train/hist_human_tell_scores"] = wandb.Histogram(metrics["_train_human_tell_scores"])
+                wandb.log(train_log_data, step=step)
 
             logger.info(
                 f"step={step} train_reward={metrics['train_reward_mean']:.3f} "
@@ -631,10 +709,16 @@ async def main():
             if step % EVAL_EVERY_STEPS == 0 and eval_docs:
                 eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
                 if CFG.wandb.enabled:
-                    wandb.log({
+                    eval_log_data = {
                         (f"eval/{k[len('eval_'):]}" if k.startswith("eval_") else k): v
                         for k, v in eval_metrics.items()
-                    }, step=step)
+                        if not k.startswith("_")
+                    }
+                    if eval_metrics.get("_eval_ai_scores"):
+                        eval_log_data["eval/hist_ai_scores"] = wandb.Histogram(eval_metrics["_eval_ai_scores"])
+                    if eval_metrics.get("_eval_human_scores"):
+                        eval_log_data["eval/hist_human_scores"] = wandb.Histogram(eval_metrics["_eval_human_scores"])
+                    wandb.log(eval_log_data, step=step)
                 if eval_metrics["eval_auroc"] > best_eval_auroc:
                     best_eval_auroc = eval_metrics["eval_auroc"]
                     best_eval_path = await _save_state_with_ttl(training_client, name=f"best-step-{step}")

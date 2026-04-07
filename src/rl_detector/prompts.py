@@ -3,13 +3,13 @@
 INSTRUCTIONS = """\
 Rules:
 - Reproduce the ENTIRE main text exactly as given, word for word, with no changes
-- Annotate any notable "tells" that indicate AI generation or human authorship
-- Wrap each notable tell with <tell explanation="EXPLANATION" type="TYPE">TEXT</tell> tags
+- Wrap each notable "tell" of AI generation or human authorship with <tell explanation="EXPLANATION" type="TYPE">TEXT</tell> tags
 - EXPLANATION is a short comment explaining why you think this is a tell
-- TYPE must be exactly "AI" if the tell points toward AI generation, or "human" if it points toward human authorship. Every <tell> tag MUST have a type attribute.
-- Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative and holistic in identifying tells, using your full knowledge of AI and human writing styles. Aim to have different types of tells with varied explanations.
-- Keep tells as short as possible, the MINIMUM span of text that supports the explanation
-- Don't use a predetermined number of tells. Instead, use your judgment to identify where tells occur in the text, which may be dense or sparse. Some documents may have many tells, others may have few or none.
+- TYPE must exactly be "AI" or "human". Every <tell> tag MUST have a type attribute
+- Don't use a predetermined number of tells. Instead, use your judgment to identify where tells occur in the text, which may be dense or sparse. Some documents may have many tells, others may have few or none
+- Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative in identifying tells, using your full knowledge and intuition to have varied and insightful explanations
+- Consider the intentions, capabilities, attributes and limitations of both human writers and AI models
+- Keep tells short, focused, and specific to particular phrases, words or characters in the text
 - Do NOT add, remove, or alter any other characters in the text
 - Do NOT include any text before or after the annotated text
 - Output the main text verbatim, with the appropriate <tell> tags added around notable phrases"""
@@ -20,6 +20,8 @@ def contrastive(main_text: str, contrast_text: str, contrast_label: int) -> str:
     The contrast document's label is revealed; the main document's label is left for the model to infer.
     """
     contrast_origin = "AI-generated" if contrast_label == 1 else "human-written"
+    main_label = 0 if contrast_label == 1 else 1
+    main_origin = "AI-generated" if main_label == 1 else "human-written"
     return f"""\
 You are an expert in identifying AI and human text.
 
@@ -27,12 +29,13 @@ Below is a reference document, followed by the main document you must annotate.
 
 {INSTRUCTIONS}
 - You should use the reference document as a guide to identify similar or contrasting "tells" in the main document. Do not reference the contrast document in your explanations, this is secret information for you to use in your analysis, not something to mention explicitly in the output.
+- Labels for this pair are known to you and should guide your annotations: reference={contrast_origin}, main={main_origin}.
 - Both documents are of opposite origin: if the reference is AI-generated, the main document is human-written, and vice versa. Use this knowledge to help identify tells in the main document.
 
-Reference document (keep this secret):
+Reference document (label: {contrast_origin}, keep this secret):
 {contrast_text}
 
-Main document (annotate this one):
+Main document (label: {main_origin}, annotate this one):
 {main_text}"""
 
 
