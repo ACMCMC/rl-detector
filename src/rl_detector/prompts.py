@@ -4,8 +4,9 @@ INSTRUCTIONS = """\
 Rules:
 - Reproduce the ENTIRE main text exactly as given, word for word, with no changes
 - Annotate any notable "tells" that indicate AI generation or human authorship
-- Wrap each notable tell with <tell explanation="EXPLANATION">TEXT</tell> tags
-- EXPLANATION is a short comment explaining why we think this is a tell
+- Wrap each notable tell with <tell explanation="EXPLANATION" type="TYPE">TEXT</tell> tags
+- EXPLANATION is a short comment explaining why you think this is a tell
+- TYPE must be exactly "AI" if the tell points toward AI generation, or "human" if it points toward human authorship. Every <tell> tag MUST have a type attribute.
 - Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative and holistic in identifying tells, using your full knowledge of AI and human writing styles. Aim to have different types of tells with varied explanations.
 - Keep tells as short as possible, the MINIMUM span of text that supports the explanation
 - Don't use a predetermined number of tells. Instead, use your judgment to identify where tells occur in the text, which may be dense or sparse. Some documents may have many tells, others may have few or none.
@@ -48,7 +49,7 @@ Text:
 FROZEN_SCORE_PROMPT = """\
 You are a scoring model that rates how strongly a phrase indicates AI generation vs. human authorship.
 
-Add a score="FLOAT" attribute inside each <tell> tag. The score rates how strongly the phrase is evidence of AI generation vs. human authorship:
+Each <tell> tag already has a type="AI" or type="human" attribute set by the annotator. Add a score="FLOAT" attribute inside each <tell> tag. The score rates how strongly the phrase is evidence of AI generation vs. human authorship:
     +1.0 = strongest AI signal
      0.0 = ambiguous / mixed signal
     -1.0 = strongest human signal
@@ -56,22 +57,25 @@ Add a score="FLOAT" attribute inside each <tell> tag. The score rates how strong
 Use a continuous score in [-1.0, 1.0], not only the anchor values above.
 Use nuanced values (for example 0.43, -0.31, 0.08) when evidence is not extreme.
 Write a custom score for every <tell> tag, even if the evidence is weak. Do not skip any tags.
+Treat all <tell> tags independently, using only the text and explanation within each tag to determine the score. Do not let one tag influence the score of another; there is no need to compare tags to each other.
 
-Output the input text exactly, with score="FLOAT" added to ALL <tell> tags. The ONLY change you should make is adding score="FLOAT" to ALL <tell> tags. Do not add, remove, or alter any other characters in the text.
+Output the input text exactly, with score="FLOAT" added to ALL <tell> tags. The ONLY change you should make is adding score="FLOAT" to ALL <tell> tags. Do not add, remove, or alter any other characters in the text (including the existing type= attributes).
 
 Example input:
-<tell explanation="formal transition common in AI">Furthermore</tell>, it <tell explanation="academic phrasing">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion">love them</tell><tell explanation="emphatic">!</tell> <tell explanation="AI assistant talk">Would you like me to continue?</tell>
+<tell explanation="formal transition common in AI" type="AI">Furthermore</tell>, it <tell explanation="academic phrasing" type="AI">may be argued</tell> that dogs are loyal <tell explanation="em dash" type="AI">—</tell> I <tell explanation="first-person emotion" type="human">lo<tell explanation="typo" type="human">ev</tell> them</tell><tell explanation="emphatic" type="human">!</tell> <tell explanation="AI assistant talk" type="AI">Would you like me to continue?</tell>
 
 Reasoning about the example input:
 - "Furthermore" is still common in human writing, so it's a mild AI signal, maybe around +0.21
 - "may be argued" is a bit more of an AI signal since LLMs tend to use such hedged language, maybe around +0.27
-- "love them" expresses personal emotion, so it's a moderate human signal, maybe around -0.58
-- "!" is an emphatic punctuation that is more common in human writing, but LLMs can use it too, so it's a slight human signal, maybe around -0.15
+- "—" is hard for a human to type on a keyboard, and AI often uses it, so it's a moderate AI signal, maybe around +0.68
+- "love them" expresses personal emotion, but AI also know how to write emotion, so it's a mild human signal, maybe around -0.28
+- "ev" is a typo, strong human, -0.78
+- "!" is an emphatic punctuation that is more common in human writing, but LLMs can use it too, so it's a slight human signal, -0.15
 - "Would you like me to continue?" is AI for sure, +1.00
 - Are all the <tell> tags annotated with a score? Yes -> We can produce the output now.
 
 Example output:
-<tell explanation="formal transition common in AI" score="+0.21">Furthermore</tell>, it <tell explanation="academic phrasing" score="+0.27">may be argued</tell> that dogs are loyal. I <tell explanation="first-person emotion" score="-0.58">love them</tell><tell explanation="emphatic" score="-0.15">!</tell> <tell explanation="AI assistant talk" score="+1.00">Would you like me to continue?</tell>
+<tell explanation="formal transition common in AI" type="AI" score="+0.21">Furthermore</tell>, it <tell explanation="academic phrasing" type="AI" score="+0.27">may be argued</tell> that dogs are loyal <tell explanation="em dash" type="AI" score="+0.68">—</tell> I <tell explanation="first-person emotion" type="human" score="-0.28">lo< tell explanation="typo" type="human" score="-0.78">ev</tell> them</tell><tell explanation="emphatic" type="human" score="-0.15">!</tell> <tell explanation="AI assistant talk" type="AI" score="+1.00">Would you like me to continue?</tell>
 
 Input:
 {tagged_text}"""

@@ -45,8 +45,8 @@ async def generate_rollouts(
         prompt_tokens = tokenizer.encode(prompt_text_formatted)
         model_input = tinker.ModelInput.from_ints(prompt_tokens)
 
-        # keep deterministic runs reproducible, each rollout gets its own seed
-        rollout_seed = (seed + i) if seed is not None else None
+        # use the same fixed seed for every rollout — diversity comes from different contrast docs
+        rollout_seed = seed
         sampling_params = tinker.SamplingParams(
             max_tokens=CFG.sampling.max_tokens,
             temperature=CFG.sampling.temperature,

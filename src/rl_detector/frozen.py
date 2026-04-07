@@ -32,6 +32,7 @@ def _extract_scored_tells(text: str) -> list[dict]:
             {
                 "span_text": span,
                 "explanation": attrs.get("explanation", ""),
+                "type": attrs.get("type"),
                 "score_raw": attrs.get("score"),
             }
         )
@@ -66,66 +67,59 @@ async def _rank_indicators_gemini(
 ) -> list[dict] | None:
     """Gemini backend for rank_indicators."""
     n = len(indicators)
-    max_attempts = 3
     prompt = FROZEN_SCORE_PROMPT.format(tagged_text=tagged_text)
     client = get_gemini_client()
-    thinking_level = _reasoning_effort_to_thinking_level(CFG.frozen.reasoning_effort)
 
     sem = _semaphore()
-    for attempt in range(1, max_attempts + 1):
-        async with sem:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=CFG.frozen.gemini_model,
-                    contents=[
-                        genai_types.Content(
-                            role="user",
-                            parts=[genai_types.Part.from_text(text=prompt)],
-                        )
-                    ],
-                    config=genai_types.GenerateContentConfig(
-                        thinking_config=genai_types.ThinkingConfig(thinking_budget=-1),
-                        max_output_tokens=CFG.frozen.max_tokens,
-                    ),
+    async with sem:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model=CFG.frozen.gemini_model,
+                contents=[
+                    genai_types.Content(
+                        role="user",
+                        parts=[genai_types.Part.from_text(text=prompt)],
+                    )
+                ],
+                config=genai_types.GenerateContentConfig(
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=-1),
+                    max_output_tokens=CFG.frozen.max_tokens,
+                    seed=CFG.frozen.seed,
                 ),
-            )
-        content = response.text or ""
-        logger.debug("gemini frozen model raw response: %r", content)
+            ),
+        )
+    content = response.text or ""
+    logger.debug("gemini frozen model raw response: %r", content)
 
-        scored_tells = _extract_scored_tells(content)
-        if len(scored_tells) != n:
-            logger.warning(
-                "gemini frozen score parse failed: found %d <tell> tags, expected %d (attempt %d/%d)",
-                len(scored_tells), n, attempt, max_attempts,
-            )
-            continue
+    scored_tells = _extract_scored_tells(content)
+    if len(scored_tells) != n:
+        logger.warning("gemini frozen score parse failed: found %d <tell> tags, expected %d; excluding rollout", len(scored_tells), n)
+        return None
 
-        score_pool: dict[tuple[str, str], list[float]] = {}
-        try:
-            for tell in scored_tells:
-                raw = tell.get("score_raw")
-                if raw is None:
-                    raise ValueError("missing score attribute in <tell> tag")
-                key = (tell["span_text"], tell["explanation"])
-                score_pool.setdefault(key, []).append(max(-1.0, min(1.0, float(raw))))
+    score_pool: dict[tuple[str, str], list[float]] = {}
+    try:
+        for tell in scored_tells:
+            raw = tell.get("score_raw")
+            if raw is None:
+                raise ValueError("missing score attribute in <tell> tag")
+            key = (tell["span_text"], tell["explanation"])
+            score_pool.setdefault(key, []).append(max(-1.0, min(1.0, float(raw))))
 
-            scores: list[float] = []
-            for ind in indicators:
-                key = (ind["span_text"], ind.get("explanation", ""))
-                bucket = score_pool.get(key)
-                if not bucket:
-                    raise ValueError(f"missing scored tell for span/explanation: {key}")
-                scores.append(bucket.pop(0))
-        except ValueError as e:
-            logger.warning("gemini frozen score parse error: %s (attempt %d/%d)", e, attempt, max_attempts)
-            continue
+        scores: list[float] = []
+        for ind in indicators:
+            key = (ind["span_text"], ind.get("explanation", ""))
+            bucket = score_pool.get(key)
+            if not bucket:
+                raise ValueError(f"missing scored tell for span/explanation: {key}")
+            scores.append(bucket.pop(0))
+    except ValueError as e:
+        logger.warning("gemini frozen score parse error: %s; excluding rollout", e)
+        return None
 
-        return [{"score": s} for s in scores]
-
-    logger.warning("gemini frozen model failed to produce valid scores after %d attempts; excluding rollout", max_attempts)
-    return None
+    types = [ind.get("type") for ind in indicators]
+    return [{"score": s, "type": t} for s, t in zip(scores, types)]
 
 
 async def rank_indicators(
@@ -135,8 +129,8 @@ async def rank_indicators(
 ) -> list[dict] | None:
     """
     Score all indicators in a single frozen model call.
-    Returns list of {score} dicts in the same order as indicators.
-    Retries parse failures up to 3 times; returns None if still invalid.
+    Returns list of {"score", "type"} dicts in the same order as indicators,
+    or None if the response cannot be parsed (rollout will be excluded).
     """
     if not indicators:
         return []
@@ -145,82 +139,54 @@ async def rank_indicators(
         return await _rank_indicators_gemini(tagged_text, indicators)
 
     n = len(indicators)
-    max_attempts = 3
-
     prompt = FROZEN_SCORE_PROMPT.format(tagged_text=tagged_text)
 
     sem = _semaphore()
-    for attempt in range(1, max_attempts + 1):
-        in_use_before = CFG.frozen.max_concurrent - sem._value
-        logger.info(
-            "frozen | waiting semaphore slot (%d tells, in_use=%d/%d, attempt=%d/%d)",
-            n,
-            in_use_before,
-            CFG.frozen.max_concurrent,
-            attempt,
-            max_attempts,
+    in_use_before = CFG.frozen.max_concurrent - sem._value
+    logger.info("frozen | waiting semaphore slot (%d tells, in_use=%d/%d)", n, in_use_before, CFG.frozen.max_concurrent)
+    async with sem:
+        in_use_after = CFG.frozen.max_concurrent - sem._value
+        logger.info("frozen | acquired semaphore slot (%d tells, in_use=%d/%d)", n, in_use_after, CFG.frozen.max_concurrent)
+        response = await client.chat.completions.create(
+            model=CFG.frozen.model,
+            messages=[{"role": "user", "content": prompt}],
+            seed=CFG.frozen.seed,
+            temperature=0.0,
+            max_tokens=CFG.frozen.max_tokens,
+            reasoning_effort=CFG.frozen.reasoning_effort,
         )
-        async with sem:
-            in_use_after = CFG.frozen.max_concurrent - sem._value
-            logger.info(
-                "frozen | acquired semaphore slot (%d tells, in_use=%d/%d)",
-                n,
-                in_use_after,
-                CFG.frozen.max_concurrent,
-            )
-            response = await client.chat.completions.create(
-                model=CFG.frozen.model,
-                messages=[{"role": "user", "content": prompt}],
-                seed=CFG.frozen.seed,
-                temperature=0.0,
-                max_tokens=CFG.frozen.max_tokens,
-                reasoning_effort=CFG.frozen.reasoning_effort,
-            )
-        logger.info("frozen | released semaphore slot (%d tells)", n)
-        content = response.choices[0].message.content or ""
-        logger.debug("frozen model raw response: %r", content)
+    logger.info("frozen | released semaphore slot (%d tells)", n)
+    content = response.choices[0].message.content or ""
+    logger.debug("frozen model raw response: %r", content)
 
-        scored_tells = _extract_scored_tells(content)
-        if len(scored_tells) != n:
-            logger.warning(
-                "frozen model score parse failed: found %d <tell> tags, expected %d (attempt %d/%d)",
-                len(scored_tells),
-                n,
-                attempt,
-                max_attempts,
-            )
-            continue
+    scored_tells = _extract_scored_tells(content)
+    if len(scored_tells) != n:
+        logger.warning("frozen model score parse failed: found %d <tell> tags, expected %d; excluding rollout", len(scored_tells), n)
+        return None
 
-        # match on the original tag identity (span + explanation), tolerate reordered tags
-        score_pool: dict[tuple[str, str], list[float]] = {}
-        try:
-            for tell in scored_tells:
-                raw = tell.get("score_raw")
-                if raw is None:
-                    raise ValueError("missing score attribute in <tell> tag")
-                key = (tell["span_text"], tell["explanation"])
-                score_pool.setdefault(key, []).append(max(-1.0, min(1.0, float(raw))))
+    # match on the original tag identity (span + explanation), tolerate reordered tags
+    score_pool: dict[tuple[str, str], list[float]] = {}
+    try:
+        for tell in scored_tells:
+            raw = tell.get("score_raw")
+            if raw is None:
+                raise ValueError("missing score attribute in <tell> tag")
+            key = (tell["span_text"], tell["explanation"])
+            score_pool.setdefault(key, []).append(max(-1.0, min(1.0, float(raw))))
 
-            scores: list[float] = []
-            for ind in indicators:
-                key = (ind["span_text"], ind.get("explanation", ""))
-                bucket = score_pool.get(key)
-                if not bucket:
-                    raise ValueError(f"missing scored tell for span/explanation: {key}")
-                scores.append(bucket.pop(0))
-        except ValueError as e:
-            logger.warning(
-                "frozen model score parse error: %s (attempt %d/%d)",
-                e,
-                attempt,
-                max_attempts,
-            )
-            continue
+        scores: list[float] = []
+        for ind in indicators:
+            key = (ind["span_text"], ind.get("explanation", ""))
+            bucket = score_pool.get(key)
+            if not bucket:
+                raise ValueError(f"missing scored tell for span/explanation: {key}")
+            scores.append(bucket.pop(0))
+    except ValueError as e:
+        logger.warning("frozen model score parse error: %s; excluding rollout", e)
+        return None
 
-        return [{"score": s} for s in scores]
-
-    logger.warning("frozen model failed to produce valid scores after %d attempts; excluding rollout", max_attempts)
-    return None
+    types = [ind.get("type") for ind in indicators]
+    return [{"score": s, "type": t} for s, t in zip(scores, types)]
 
 
 def aggregate(scored: list[dict]) -> float:

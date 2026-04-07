@@ -345,6 +345,7 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
                     {
                         "span_text": ind["span_text"],
                         "explanation": ind["explanation"],
+                        "type": ind.get("type"),
                         "frozen_score": fs["score"],
                     }
                     for ind, fs in zip(all_indicators[i], all_frozen_scored[i])
@@ -382,7 +383,7 @@ async def train_step(
                 sampling_client, tokenizer, frozen_client, doc,
                 all_docs=all_docs,
                 rng=random.Random(GLOBAL_SEED + step * 1000 + i),
-                rollout_seed=GLOBAL_SEED + step * 1000 + i,
+                rollout_seed=GLOBAL_SEED,
             )
             for i, doc in enumerate(docs)
         ]
@@ -463,6 +464,17 @@ async def train_step(
         if all_tell_scores else 0.0
     )
 
+    # per-label reward breakdown: AI docs (label=1) vs human docs (label=0)
+    ai_rewards = [ro["reward"] for da in docs_audit if da["label"] == 1 for ro in da["rollouts"] if ro.get("used_for_optimization") and ro["reward"] is not None]
+    human_rewards = [ro["reward"] for da in docs_audit if da["label"] == 0 for ro in da["rollouts"] if ro.get("used_for_optimization") and ro["reward"] is not None]
+    ai_reward_mean = (sum(ai_rewards) / len(ai_rewards)) if ai_rewards else 0.0
+    human_reward_mean = (sum(human_rewards) / len(human_rewards)) if human_rewards else 0.0
+
+    ai_tell_scores = [ind["frozen_score"] for da in docs_audit if da["label"] == 1 for ro in da["rollouts"] for ind in ro.get("indicators", [])]
+    human_tell_scores = [ind["frozen_score"] for da in docs_audit if da["label"] == 0 for ro in da["rollouts"] for ind in ro.get("indicators", [])]
+    ai_tell_score_mean = (sum(ai_tell_scores) / len(ai_tell_scores)) if ai_tell_scores else 0.0
+    human_tell_score_mean = (sum(human_tell_scores) / len(human_tell_scores)) if human_tell_scores else 0.0
+
     # per-rollout reward breakdown for wandb
     n_positive = sum(1 for rw in all_rewards if rw > 0)
     n_negative = sum(1 for rw in all_rewards if rw < 0)
@@ -492,6 +504,10 @@ async def train_step(
         "train_n_excluded_rollouts": n_excluded_rollouts,
         "train_tell_score_mean": tell_score_mean,
         "train_tell_score_std": tell_score_std,
+        "train_ai_reward_mean": ai_reward_mean,
+        "train_human_reward_mean": human_reward_mean,
+        "train_ai_tell_score_mean": ai_tell_score_mean,
+        "train_human_tell_score_mean": human_tell_score_mean,
         "timing_save_weights_s": dt_save,
         "timing_fwd_bwd_s": fb_dt,
         "timing_optim_s": opt_dt,
@@ -595,6 +611,10 @@ async def main():
                     "train/n_excluded_rollouts": metrics["train_n_excluded_rollouts"],
                     "train/tell_score_mean": metrics["train_tell_score_mean"],
                     "train/tell_score_std": metrics["train_tell_score_std"],
+                    "train/ai_reward_mean": metrics["train_ai_reward_mean"],
+                    "train/human_reward_mean": metrics["train_human_reward_mean"],
+                    "train/ai_tell_score_mean": metrics["train_ai_tell_score_mean"],
+                    "train/human_tell_score_mean": metrics["train_human_tell_score_mean"],
                     "timing/save_weights_s": metrics["timing_save_weights_s"],
                     "timing/fwd_bwd_s": metrics["timing_fwd_bwd_s"],
                     "timing/optim_s": metrics["timing_optim_s"],
