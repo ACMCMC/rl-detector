@@ -20,17 +20,22 @@ Rules:
 - OUTPUT ONLY THE ORIGINAL MAIN TEXT WITH <tell ...> TAGS INSERTED; DO NOT OUTPUT ANY EXPLANATION, ANALYSIS, REASONING, PREFACE, OR EXTRA TEXT"""
 
 
-def contrastive(main_text: str, contrast_text: str, contrast_label: int) -> str:
-    """Teacher prompt: includes a labeled reference document to guide annotation of the main document.
-    The contrast document's label is revealed; the main document's label is left for the model to infer.
-    """
-    contrast_origin = "AI-generated" if contrast_label == 1 else "human-written"
-    main_label = 0 if contrast_label == 1 else 1
-    main_origin = "AI-generated" if main_label == 1 else "human-written"
+def contrastive(main_text: str, contrast_text: str, contrast_label: int, main_label_hint: int, show_labels: bool) -> str:
+    """Teacher prompt: always has labels internally; optionally hides them from model text."""
+    contrast_origin = "AI" if contrast_label == 1 else "human"
+    main_origin = "AI" if main_label_hint == 1 else "human"
+
+    if show_labels:
+        reference_header = f"Reference document (label: {contrast_origin}, keep this secret):"
+        main_origin_line = f"Main document (label hint: {main_origin}, annotate this one):"
+    else:
+        reference_header = "Reference document:"
+        main_origin_line = "Main document (annotate this one):"
+
     return f"""\
 You are an expert in identifying AI and human text that pays close attention to subtle "tells" that can reveal the origin of a document.
 
-You will be given two documents, a reference document and a main document. One of them is AI-generated and the other is human-written.
+You will be given two documents, a reference document and a main document.
 
 {INSTRUCTIONS}
 - Do not reference the reference document in your explanations, this is secret information for you to use in your analysis, not something to mention explicitly in the output
@@ -39,12 +44,12 @@ You will be given two documents, a reference document and a main document. One o
 - Your final output must contain only the annotated main document. Never output any part of the reference document
 - The main document comes last, and your answer should reproduce only that text
 
-Reference document (label: {contrast_origin}, keep this secret):
+{reference_header}
 ```
 {contrast_text}
 ```
 
-Main document (label: {main_origin}, annotate this one):
+{main_origin_line}
 ```
 {main_text}
 ```"""

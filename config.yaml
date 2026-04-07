@@ -9,6 +9,9 @@ model:
 training:
   k: 8                       # rollouts per document (K/2 AI-directed, K/2 human-directed)
   docs_per_step: 8           # documents per GRPO step (half AI, half human)
+  label_noise_correct_prob: 0.40
+  label_noise_flip_prob: 0.30
+  label_noise_unknown_prob: 0.30
   learning_rate: 5.0e-5
   max_steps: 100
   checkpoint_every: 5        # save Tinker checkpoint every N steps

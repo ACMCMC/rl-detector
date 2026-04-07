@@ -36,6 +36,22 @@ GLOBAL_SEED = 2262
 SAVE_TTL_SECONDS = 2 * 24 * 60 * 60
 
 
+def _sample_label_noise_mode(rng: random.Random) -> str:
+    # small helper: decide which supervision hint to use per rollout
+    p_correct = float(getattr(CFG.training, "label_noise_correct_prob", 1.0))
+    p_flip = float(getattr(CFG.training, "label_noise_flip_prob", 0.0))
+    p_unknown = float(getattr(CFG.training, "label_noise_unknown_prob", 0.0))
+    tot = max(1e-12, p_correct + p_flip + p_unknown)
+    p_correct /= tot
+    p_flip /= tot
+    u = rng.random()
+    if u < p_correct:
+        return "correct"
+    if u < (p_correct + p_flip):
+        return "flip"
+    return "unknown"
+
+
 def _p95(values: list[int]) -> int:
     if not values:
         return 0
@@ -273,18 +289,52 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
         )
     )
 
-    # sample K contrast docs of opposite label (teacher privileged context, one per rollout)
-    opposite_label = 1 - label
-    contrast_pool = [d for d in all_docs if d["label"] == opposite_label and d is not doc]
-    if len(contrast_pool) < CFG.training.k:
-        logger.warning("rollouts | contrast pool too small (%d), sampling with replacement", len(contrast_pool))
-        contrast_docs = rng.choices(contrast_pool, k=CFG.training.k)
-    else:
-        contrast_docs = rng.sample(contrast_pool, k=CFG.training.k)
+    # sample a noisy supervision mode per rollout
+    noise_modes = [_sample_label_noise_mode(rng) for _ in range(CFG.training.k)]
+    main_label_hints: list[int] = []
+    show_labels_flags: list[bool] = []
+    for mode in noise_modes:
+        if mode == "correct":
+            main_label_hints.append(label)
+            show_labels_flags.append(True)
+        elif mode == "flip":
+            main_label_hints.append(1 - label)
+            show_labels_flags.append(True)
+        else:
+            # unknown means: keep label internally, hide it in prompt text
+            main_label_hints.append(label)
+            show_labels_flags.append(False)
+
+    # choose one contrast doc per rollout, conditioned on noisy hint when known
+    contrast_docs: list[dict] = []
+    for i in range(CFG.training.k):
+        hint = main_label_hints[i]
+        if not show_labels_flags[i]:
+            target_contrast_label = rng.choice([0, 1])
+        else:
+            target_contrast_label = 1 - hint
+        contrast_pool = [d for d in all_docs if d["label"] == target_contrast_label and d is not doc]
+        if not contrast_pool:
+            contrast_pool = [d for d in all_docs if d is not doc]
+        contrast_docs.append(rng.choice(contrast_pool))
 
     logger.info("rollouts | generating K=%d for %s doc: %r... (seed=%s)", CFG.training.k, label_str, snippet, rollout_seed)
+    logger.info(
+        "rollouts | noisy modes: correct=%d flip=%d unknown=%d",
+        sum(1 for m in noise_modes if m == "correct"),
+        sum(1 for m in noise_modes if m == "flip"),
+        sum(1 for m in noise_modes if m == "unknown"),
+    )
     t0_rollouts = time.perf_counter()
-    rollouts = await generate_rollouts(sampling_client, tokenizer, document, contrast_docs=contrast_docs, seed=rollout_seed)
+    rollouts = await generate_rollouts(
+        sampling_client,
+        tokenizer,
+        document,
+        contrast_docs=contrast_docs,
+        main_label_hints=main_label_hints,
+        show_labels_flags=show_labels_flags,
+        seed=rollout_seed,
+    )
     dt_rollouts = time.perf_counter() - t0_rollouts
     n_tells_per_rollout = [len(parse_indicators(r["response_text"]) or []) for r in rollouts]
     logger.info("rollouts | done in %.1fs — tells per rollout: %s", dt_rollouts, n_tells_per_rollout)
@@ -382,14 +432,14 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
     format_rate = (sum(1 for fmt in format_used if fmt) / len(format_used)) if format_used else 0.0
 
     contrast_labels_used = [r["contrast_label"] for r in rollouts]
-    assert all(cl != label for cl in contrast_labels_used), (
-        f"contrast doc has same label as main doc (label={label}): {contrast_labels_used}"
-    )
 
     doc_audit = {
         "document": document,
         "label": label,
         "contrast_labels": contrast_labels_used,
+        "noise_modes": noise_modes,
+        "main_label_hints": main_label_hints,
+        "show_labels_flags": show_labels_flags,
         "reward_mean": reward_mean,
         "format_rate": format_rate,
         "n_excluded_rollouts": sum(1 for use in used_for_optimization if not use),
@@ -397,6 +447,9 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
             {
                 "index": i,
                 "contrast_label": r["contrast_label"],
+                "noise_mode": noise_modes[i],
+                "main_label_hint": r.get("main_label_hint"),
+                "show_labels": r.get("show_labels"),
                 "used_for_optimization": used_for_optimization[i],
                 "exclude_reason": exclude_reasons[i],
                 "format_ok": format_ok_flags[i],

@@ -25,7 +25,8 @@ def extract_response_text(text: str) -> str:
         return channel_blocks[-1].group(2).strip()
 
     without_thinking = _THINK_BLOCK_RE.sub("", text).strip()
-    return without_thinking if without_thinking else text.strip()
+    without_start_end_backticks = without_thinking.strip("`")
+    return without_start_end_backticks if without_start_end_backticks else text.strip()
 
 
 async def generate_rollouts(
@@ -33,6 +34,8 @@ async def generate_rollouts(
     tokenizer,
     document: str,
     contrast_docs: list[dict],
+    main_label_hints: list[int],
+    show_labels_flags: list[bool],
     K: int | None = None,
     seed: int | None = None,
 ) -> list[dict]:
@@ -51,12 +54,17 @@ async def generate_rollouts(
     if K is None:
         K = CFG.training.k
     assert len(contrast_docs) == K, f"expected {K} contrast docs, got {len(contrast_docs)}"
-    # enforce that all contrast docs have the same label (the caller picks opposite-label docs)
-    contrast_labels = {c["label"] for c in contrast_docs}
-    assert len(contrast_labels) == 1, f"contrast docs must all share one label, got {contrast_labels}"
+    assert len(main_label_hints) == K, f"expected {K} main label hints, got {len(main_label_hints)}"
+    assert len(show_labels_flags) == K, f"expected {K} show-label flags, got {len(show_labels_flags)}"
 
-    async def _sample_one(i: int, contrast: dict) -> dict:
-        prompt_text = contrastive(document, contrast["text"], contrast["label"])
+    async def _sample_one(i: int, contrast: dict, main_label_hint: int, show_labels: bool) -> dict:
+        prompt_text = contrastive(
+            document,
+            contrast["text"],
+            contrast["label"],
+            main_label_hint=main_label_hint,
+            show_labels=show_labels,
+        )
         prompt_text_formatted = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt_text}],
             tokenize=False,
@@ -96,7 +104,9 @@ async def generate_rollouts(
             "completion_tokens": completion_tokens,
             "completion_logprobs": completion_logprobs,
             "contrast_label": contrast["label"],
+            "main_label_hint": main_label_hint,
+            "show_labels": show_labels,
         }
 
-    tasks = [_sample_one(i, contrast) for i, contrast in enumerate(contrast_docs)]
+    tasks = [_sample_one(i, contrast, main_label_hints[i], show_labels_flags[i]) for i, contrast in enumerate(contrast_docs)]
     return await asyncio.gather(*tasks)
