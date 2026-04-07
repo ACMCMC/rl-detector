@@ -1,5 +1,8 @@
 """All prompt templates. Three variants: contrastive (teacher), neutral (student)."""
 
+from rl_detector.fewshots import pick_fewshot
+from rl_detector.config import CFG
+
 INSTRUCTIONS = """\
 Rules:
 - Reproduce the ENTIRE main text exactly as given, word for word, with no changes
@@ -13,9 +16,6 @@ Rules:
 - Get into the head of each writer: consider the intentions, capabilities, attributes and limitations of both human writers and AI models
 - Keep tells short, focused, and specific to particular phrases, words or characters in the text
 - Preserve every character outside the tags exactly, including punctuation, spacing, capitalization, and line breaks
-- Do NOT add, remove, or alter any other characters in the text
-- Do NOT include any text before or after the annotated text
-- Do NOT output headers, labels, markdown, XML wrappers, analysis, or any extra lines
 - COPY THE MAIN TEXT CHARACTER BY CHARACTER; preserve all punctuation, spacing, capitalization, and line breaks exactly
 - OUTPUT ONLY THE ORIGINAL MAIN TEXT WITH <tell ...> TAGS INSERTED; DO NOT OUTPUT ANY EXPLANATION, ANALYSIS, REASONING, PREFACE, OR EXTRA TEXT"""
 
@@ -26,11 +26,24 @@ def contrastive(main_text: str, contrast_text: str, contrast_label: int, main_la
     main_origin = "AI" if main_label_hint == 1 else "human"
 
     if show_labels:
-        reference_header = f"Reference document (label: {contrast_origin}, keep this secret):"
+        reference_header = f"Reference document (label: {contrast_origin}):"
         main_origin_line = f"Main document (label hint: {main_origin}, annotate this one):"
     else:
         reference_header = "Reference document:"
         main_origin_line = "Main document (annotate this one):"
+
+    use_fewshot = getattr(getattr(CFG, "training", {}), "use_fewshot_examples", True)
+    if use_fewshot:
+        fewshot = pick_fewshot(
+            main_text=main_text,
+            contrast_text=contrast_text,
+            contrast_label=contrast_label,
+            main_label_hint=main_label_hint,
+            show_labels=show_labels,
+        )
+        fewshot_block = f"- Here is one style example of valid tells; this is just a style reference, not a template to copy\n{fewshot}"
+    else:
+        fewshot_block = ""
 
     return f"""\
 You are an expert in identifying AI and human text that pays close attention to subtle "tells" that can reveal the origin of a document.
@@ -41,6 +54,7 @@ You will be given two documents, a reference document and a main document.
 - Do not reference the reference document in your explanations, this is secret information for you to use in your analysis, not something to mention explicitly in the output
 - You should use the reference document as a guide to see how AI and human writing can differ, but do not assume that the main document will have the same style or same types of tells as the reference document
 - You should carefully inspect both documents and their origins to see how you can tell them apart
+{fewshot_block}
 - Your final output must contain only the annotated main document. Never output any part of the reference document
 - The main document comes last, and your answer should reproduce only that text
 
