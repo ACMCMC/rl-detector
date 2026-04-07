@@ -9,10 +9,13 @@ model:
 training:
   k: 8                       # rollouts per document (K/2 AI-directed, K/2 human-directed)
   docs_per_step: 8           # documents per GRPO step (half AI, half human)
-  learning_rate: 2.0e-5
+  learning_rate: 5.0e-5
   max_steps: 100
   checkpoint_every: 5        # save Tinker checkpoint every N steps
   audit_log_path: "audit_log.jsonl"
+  granularity_weight: 0.15
+  margin_weight: 0.35
+  margin_target: 0.45
 
 sampling:
   max_tokens: 8192
@@ -40,7 +43,7 @@ web:
   # checkpoint_path: "tinker://8410fbd4-6244-5af5-8251-eb091dc2fce4:train:0/sampler_weights/final"      # optional default trained checkpoint path
   # checkpoint_path: "tinker://994fa569-56fa-54a1-9950-73e41c8a549b:train:0/sampler_weights/step-5"      # optional default trained checkpoint path
   # checkpoint_path: "tinker://d444eee2-7ebe-5af9-aaa4-b1789b7bf988:train:0/sampler_weights/best-step-10"      # optional default trained checkpoint path
-  checkpoint_path: "tinker://0240407a-761b-5116-aa7c-340e3725ecbd:train:0/sampler_weights/best-step-15"      # optional default trained checkpoint path
+  checkpoint_path: "tinker://694b8626-b046-570a-93f6-31419ac49e5e:train:0/sampler_weights/best-step-25"      # optional default trained checkpoint path
   host: "127.0.0.1"
   port: 8000
   result_cache: true

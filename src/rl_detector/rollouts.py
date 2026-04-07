@@ -1,11 +1,31 @@
 """Generate rollouts from the current policy using contrastive (teacher) prompts."""
 
 import asyncio
+import re
 
 import tinker
 
 from rl_detector.config import CFG
 from rl_detector.prompts import contrastive
+
+_CHANNEL_BLOCK_RE = re.compile(
+    r"<\|channel\|>\s*([^<\s]+)\s*<\|message\|>(.*?)(?=(?:<\|channel\|>)|(?:<\|end\|>)|(?:<\|return\|>)|$)",
+    re.DOTALL,
+)
+_THINK_BLOCK_RE = re.compile(r"<(?:think|thinking|reasoning|analysis)>.*?</(?:think|thinking|reasoning|analysis)>", re.DOTALL | re.IGNORECASE)
+
+
+def extract_response_text(text: str) -> str:
+    """Best-effort extraction of user-facing response text from a full completion."""
+    channel_blocks = list(_CHANNEL_BLOCK_RE.finditer(text))
+    if channel_blocks:
+        for m in channel_blocks:
+            if m.group(1).strip().lower() == "final":
+                return m.group(2).strip()
+        return channel_blocks[-1].group(2).strip()
+
+    without_thinking = _THINK_BLOCK_RE.sub("", text).strip()
+    return without_thinking if without_thinking else text.strip()
 
 
 async def generate_rollouts(
@@ -68,8 +88,11 @@ async def generate_rollouts(
             completion_logprobs = [0.0] * len(completion_tokens)
         assert any(lp != 0.0 for lp in completion_logprobs), "completion_logprobs are all 0.0"
 
+        completion_text = tokenizer.decode(completion_tokens)
+
         return {
-            "completion_text": tokenizer.decode(completion_tokens),
+            "completion_text": completion_text,
+            "response_text": extract_response_text(completion_text),
             "completion_tokens": completion_tokens,
             "completion_logprobs": completion_logprobs,
             "contrast_label": contrast["label"],

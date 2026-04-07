@@ -21,8 +21,8 @@ from rl_detector.config import CFG
 from rl_detector.data import iter_balanced_steps, load_docs
 from rl_detector.frozen import get_client, rank_indicators
 from rl_detector.prompts import neutral
-from rl_detector.rewards import compute_advantages, compute_reward, format_reward, parse_indicators
-from rl_detector.rollouts import generate_rollouts
+from rl_detector.rewards import compute_advantages, compute_reward, format_diagnostics, format_reward, format_status, parse_indicators
+from rl_detector.rollouts import extract_response_text, generate_rollouts
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -113,8 +113,10 @@ async def _sample_standard_rollout(sampling_client, tokenizer, document: str) ->
     else:
         completion_logprobs = [0.0] * len(completion_tokens)
     assert any(lp != 0.0 for lp in completion_logprobs), "completion_logprobs are all 0.0"
+    completion_text = tokenizer.decode(completion_tokens)
     return {
-        "completion_text": tokenizer.decode(completion_tokens),
+        "completion_text": completion_text,
+        "response_text": extract_response_text(completion_text),
         "completion_tokens": completion_tokens,
         "completion_logprobs": completion_logprobs,
     }
@@ -126,21 +128,31 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
 
     async def score_eval_doc(doc):
         rollout = await _sample_standard_rollout(sampling_client, tokenizer, doc["text"])
-        indicators = parse_indicators(rollout["completion_text"]) or []
-        format_ok = format_reward(rollout["completion_text"], doc["text"]) == 1.0
+        response_text = rollout["response_text"]
+        indicators = parse_indicators(response_text) or []
+        fmt = format_diagnostics(response_text, doc["text"])
+        format_ok = bool(fmt["ok"])
+        format_reason = str(fmt["reason"])
+        format_char_diff = int(fmt["char_diff_count"])
         if not format_ok:
-            return 0.0, True, False, None, None, doc["label"]
-        frozen_scored = await rank_indicators(frozen_client, rollout["completion_text"], indicators) if indicators else []
+            return 0.0, True, False, f"format:{format_reason}", None, doc["label"], format_char_diff
+        frozen_scored = await rank_indicators(frozen_client, response_text, indicators) if indicators else []
         if indicators and frozen_scored is None:
-            return None, False, True, "frozen_parse_failed", None, doc["label"]
-        reward = compute_reward(rollout["completion_text"], doc["text"], doc["label"], frozen_scored)
+            return None, False, True, "frozen_parse_failed", None, doc["label"], 0
+        reward = compute_reward(response_text, doc["text"], doc["label"], frozen_scored)
         agg_score = sum(s["score"] for s in frozen_scored) / len(frozen_scored) if frozen_scored else 0.0
-        return reward, True, True, None, agg_score, doc["label"]
+        return reward, True, True, "ok", agg_score, doc["label"], 0
 
     results = await asyncio.gather(*[score_eval_doc(doc) for doc in eval_docs])
     rewards = [0.0 if res[0] is None else res[0] for res in results if res[1]]
     format_ok_flags = [res[2] for res in results if res[1]]
     n_excluded = sum(1 for res in results if not res[1])
+    format_reasons = [res[3] for res in results if res[3] is not None]
+    format_char_diffs = [res[6] for res in results]
+    eval_format_no_tells = sum(1 for r in format_reasons if r == "format:no_tells")
+    eval_format_invalid_type = sum(1 for r in format_reasons if r == "format:invalid_type")
+    eval_format_text_mismatch = sum(1 for r in format_reasons if r == "format:text_mismatch")
+    eval_text_mismatch_char_diffs = [res[6] for res in results if res[3] == "format:text_mismatch"]
     agg_scores = [res[4] for res in results if res[1] and res[4] is not None]
     true_labels = [res[5] for res in results if res[1] and res[4] is not None]
 
@@ -191,6 +203,13 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
         "eval_human_score_p10": _quantile(eval_human_scores, 0.10),
         "eval_human_score_p50": _quantile(eval_human_scores, 0.50),
         "eval_human_score_p90": _quantile(eval_human_scores, 0.90),
+        "eval_format_no_tells": eval_format_no_tells,
+        "eval_format_invalid_type": eval_format_invalid_type,
+        "eval_format_text_mismatch": eval_format_text_mismatch,
+        "eval_format_char_diff_mean": (sum(format_char_diffs) / len(format_char_diffs)) if format_char_diffs else 0.0,
+        "eval_text_mismatch_char_diff_mean": (sum(eval_text_mismatch_char_diffs) / len(eval_text_mismatch_char_diffs)) if eval_text_mismatch_char_diffs else 0.0,
+        "eval_text_mismatch_char_diff_p95": _quantile(eval_text_mismatch_char_diffs, 0.95),
+        "eval_text_mismatch_char_diff_max": max(eval_text_mismatch_char_diffs) if eval_text_mismatch_char_diffs else 0,
         "_eval_ai_scores": eval_ai_scores,
         "_eval_human_scores": eval_human_scores,
     }
@@ -267,7 +286,7 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
     t0_rollouts = time.perf_counter()
     rollouts = await generate_rollouts(sampling_client, tokenizer, document, contrast_docs=contrast_docs, seed=rollout_seed)
     dt_rollouts = time.perf_counter() - t0_rollouts
-    n_tells_per_rollout = [len(parse_indicators(r["completion_text"]) or []) for r in rollouts]
+    n_tells_per_rollout = [len(parse_indicators(r["response_text"]) or []) for r in rollouts]
     logger.info("rollouts | done in %.1fs — tells per rollout: %s", dt_rollouts, n_tells_per_rollout)
 
     # Re-score each completion under the neutral prompt so that the old logprobs
@@ -292,23 +311,33 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
     logger.info("rollouts | re-scoring done in %.1fs", dt_rescore)
 
     async def score_and_reward(i, r):
-        indicators = parse_indicators(r["completion_text"]) or []
-        format_ok = format_reward(r["completion_text"], document) == 1.0
+        response_text = r["response_text"]
+        indicators = parse_indicators(response_text) or []
+        fmt = format_diagnostics(response_text, document)
+        format_ok = bool(fmt["ok"])
+        format_reason = str(fmt["reason"])
+        format_char_diff = int(fmt["char_diff_count"])
         contrast_label_str = "AI" if r["contrast_label"] == 1 else "human"
         logger.info("scoring  | rollout %d/%d (contrast=%s): %d tells", i + 1, CFG.training.k, contrast_label_str, len(indicators))
         if not format_ok:
-            logger.info("scoring  | rollout %d/%d format invalid, reward=0 and skip frozen scoring", i + 1, CFG.training.k)
-            return indicators, [], 0.0, True, None, False, 0.0
+            logger.info(
+                "scoring  | rollout %d/%d format invalid (%s, char_diff=%d), reward=0 and skip frozen scoring",
+                i + 1,
+                CFG.training.k,
+                format_reason,
+                format_char_diff,
+            )
+            return indicators, [], 0.0, True, f"format:{format_reason}", False, 0.0, format_char_diff
         t0_frozen = time.perf_counter()
-        frozen_scored = await rank_indicators(frozen_client, r["completion_text"], indicators) if indicators else []
+        frozen_scored = await rank_indicators(frozen_client, response_text, indicators) if indicators else []
         dt_frozen = time.perf_counter() - t0_frozen
         if indicators and frozen_scored is None:
             logger.warning("scoring  | rollout %d/%d excluded: frozen score parse failed after retries", i + 1, CFG.training.k)
-            return indicators, [], None, False, "frozen_parse_failed", True, dt_frozen
-        reward = compute_reward(r["completion_text"], document, label, frozen_scored)
+            return indicators, [], None, False, "frozen_parse_failed", True, dt_frozen, 0
+        reward = compute_reward(response_text, document, label, frozen_scored)
         agg = sum(s["score"] for s in frozen_scored) / len(frozen_scored) if frozen_scored else 0.0
         logger.info("scoring  | rollout %d/%d done in %.1fs — agg=%.3f reward=%.1f", i + 1, CFG.training.k, dt_frozen, agg, reward)
-        return indicators, frozen_scored, reward, True, None, True, dt_frozen
+        return indicators, frozen_scored, reward, True, "ok", True, dt_frozen, 0
 
     logger.info("scoring  | sending %d rollouts to frozen model", len(rollouts))
     t0_scoring = time.perf_counter()
@@ -321,6 +350,7 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
     exclude_reasons = [res[4] for res in results]
     format_ok_flags = [res[5] for res in results]
     frozen_times = [res[6] for res in results]
+    format_char_diffs = [res[7] for res in results]
     dt_frozen_mean = sum(frozen_times) / len(frozen_times) if frozen_times else 0.0
     logger.info(
         "timing   | doc=%r rollouts=%.1fs rescore=%.1fs scoring=%.1fs (frozen mean/rollout=%.1fs)",
@@ -371,8 +401,10 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
                 "exclude_reason": exclude_reasons[i],
                 "format_ok": format_ok_flags[i],
                 "completion_text": r["completion_text"],
+                "response_text": r["response_text"],
                 "completion_tokens_len": len(r["completion_tokens"]),
                 "completion_logprobs_len": len(r["completion_logprobs"]),
+                "format_char_diff_count": format_char_diffs[i],
                 "indicators": [
                     {
                         "span_text": ind["span_text"],
@@ -516,6 +548,13 @@ async def train_step(
     type_ai_score_mean = (sum(type_ai_scores) / len(type_ai_scores)) if type_ai_scores else 0.0
     type_human_score_mean = (sum(type_human_scores) / len(type_human_scores)) if type_human_scores else 0.0
 
+    all_exclude_reasons = [ro.get("exclude_reason") for da in docs_audit for ro in da["rollouts"]]
+    train_format_no_tells = sum(1 for r in all_exclude_reasons if r == "format:no_tells")
+    train_format_invalid_type = sum(1 for r in all_exclude_reasons if r == "format:invalid_type")
+    train_format_text_mismatch = sum(1 for r in all_exclude_reasons if r == "format:text_mismatch")
+    train_text_mismatch_char_diffs = [ro.get("format_char_diff_count", 0) for da in docs_audit for ro in da["rollouts"] if ro.get("exclude_reason") == "format:text_mismatch"]
+    train_all_format_char_diffs = [ro.get("format_char_diff_count", 0) for da in docs_audit for ro in da["rollouts"]]
+
     # per-rollout reward breakdown for wandb
     n_positive = sum(1 for rw in all_rewards if rw > 0)
     n_negative = sum(1 for rw in all_rewards if rw < 0)
@@ -561,6 +600,13 @@ async def train_step(
         "train_human_tell_score_p90": _quantile(human_tell_scores, 0.90),
         "train_type_ai_score_mean": type_ai_score_mean,
         "train_type_human_score_mean": type_human_score_mean,
+        "train_format_no_tells": train_format_no_tells,
+        "train_format_invalid_type": train_format_invalid_type,
+        "train_format_text_mismatch": train_format_text_mismatch,
+        "train_format_char_diff_mean": (sum(train_all_format_char_diffs) / len(train_all_format_char_diffs)) if train_all_format_char_diffs else 0.0,
+        "train_text_mismatch_char_diff_mean": (sum(train_text_mismatch_char_diffs) / len(train_text_mismatch_char_diffs)) if train_text_mismatch_char_diffs else 0.0,
+        "train_text_mismatch_char_diff_p95": _quantile(train_text_mismatch_char_diffs, 0.95),
+        "train_text_mismatch_char_diff_max": max(train_text_mismatch_char_diffs) if train_text_mismatch_char_diffs else 0,
         "_train_ai_tell_scores": ai_tell_scores,
         "_train_human_tell_scores": human_tell_scores,
         "timing_save_weights_s": dt_save,
@@ -635,15 +681,23 @@ async def main():
         if eval_docs:
             eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
             if CFG.wandb.enabled:
-                eval_log_data = {
-                    (f"eval/{k[len('eval_'):]}" if k.startswith("eval_") else k): v
-                    for k, v in eval_metrics.items()
-                    if not k.startswith("_")
+                eval_core = {
+                    "eval_reward_mean",
+                    "eval_format_rate",
+                    "eval_n_excluded_rollouts",
+                    "eval_auroc",
+                    "eval_tpr_at_fpr_001",
                 }
+                eval_log_data = {}
+                for k, v in eval_metrics.items():
+                    if k.startswith("_") or not k.startswith("eval_"):
+                        continue
+                    prefix = "eval" if k in eval_core else "eval_diag"
+                    eval_log_data[f"{prefix}/{k[len('eval_'):]}"] = v
                 if eval_metrics.get("_eval_ai_scores"):
-                    eval_log_data["eval/hist_ai_scores"] = wandb.Histogram(eval_metrics["_eval_ai_scores"])
+                    eval_log_data["eval_diag/hist_ai_scores"] = wandb.Histogram(eval_metrics["_eval_ai_scores"])
                 if eval_metrics.get("_eval_human_scores"):
-                    eval_log_data["eval/hist_human_scores"] = wandb.Histogram(eval_metrics["_eval_human_scores"])
+                    eval_log_data["eval_diag/hist_human_scores"] = wandb.Histogram(eval_metrics["_eval_human_scores"])
                 wandb.log(eval_log_data, step=step)
             if eval_metrics["eval_auroc"] > best_eval_auroc:
                 best_eval_auroc = eval_metrics["eval_auroc"]
@@ -670,32 +724,39 @@ async def main():
                     "train/n_negative_rollouts": metrics["train_n_negative"],
                     "train/n_zero_rollouts": metrics["train_n_zero"],
                     "train/n_excluded_rollouts": metrics["train_n_excluded_rollouts"],
-                    "train/tell_score_mean": metrics["train_tell_score_mean"],
-                    "train/tell_score_std": metrics["train_tell_score_std"],
                     "train/ai_reward_mean": metrics["train_ai_reward_mean"],
                     "train/human_reward_mean": metrics["train_human_reward_mean"],
-                    "train/ai_tell_score_mean": metrics["train_ai_tell_score_mean"],
-                    "train/human_tell_score_mean": metrics["train_human_tell_score_mean"],
-                    "train/tell_score_gap_ai_minus_human": metrics["train_tell_score_gap_ai_minus_human"],
-                    "train/ai_positive_rate": metrics["train_ai_positive_rate"],
-                    "train/human_negative_rate": metrics["train_human_negative_rate"],
-                    "train/ambiguous_rate_abs_lt_02": metrics["train_ambiguous_rate_abs_lt_02"],
-                    "train/ai_tell_score_p10": metrics["train_ai_tell_score_p10"],
-                    "train/ai_tell_score_p50": metrics["train_ai_tell_score_p50"],
-                    "train/ai_tell_score_p90": metrics["train_ai_tell_score_p90"],
-                    "train/human_tell_score_p10": metrics["train_human_tell_score_p10"],
-                    "train/human_tell_score_p50": metrics["train_human_tell_score_p50"],
-                    "train/human_tell_score_p90": metrics["train_human_tell_score_p90"],
-                    "train/type_ai_score_mean": metrics["train_type_ai_score_mean"],
-                    "train/type_human_score_mean": metrics["train_type_human_score_mean"],
+                    "train_diag/tell_score_mean": metrics["train_tell_score_mean"],
+                    "train_diag/tell_score_std": metrics["train_tell_score_std"],
+                    "train_diag/ai_tell_score_mean": metrics["train_ai_tell_score_mean"],
+                    "train_diag/human_tell_score_mean": metrics["train_human_tell_score_mean"],
+                    "train_diag/tell_score_gap_ai_minus_human": metrics["train_tell_score_gap_ai_minus_human"],
+                    "train_diag/ai_positive_rate": metrics["train_ai_positive_rate"],
+                    "train_diag/human_negative_rate": metrics["train_human_negative_rate"],
+                    "train_diag/ambiguous_rate_abs_lt_02": metrics["train_ambiguous_rate_abs_lt_02"],
+                    "train_diag/ai_tell_score_p10": metrics["train_ai_tell_score_p10"],
+                    "train_diag/ai_tell_score_p50": metrics["train_ai_tell_score_p50"],
+                    "train_diag/ai_tell_score_p90": metrics["train_ai_tell_score_p90"],
+                    "train_diag/human_tell_score_p10": metrics["train_human_tell_score_p10"],
+                    "train_diag/human_tell_score_p50": metrics["train_human_tell_score_p50"],
+                    "train_diag/human_tell_score_p90": metrics["train_human_tell_score_p90"],
+                    "train_diag/type_ai_score_mean": metrics["train_type_ai_score_mean"],
+                    "train_diag/type_human_score_mean": metrics["train_type_human_score_mean"],
+                    "train_diag/format_no_tells": metrics["train_format_no_tells"],
+                    "train_diag/format_invalid_type": metrics["train_format_invalid_type"],
+                    "train_diag/format_text_mismatch": metrics["train_format_text_mismatch"],
+                    "train_diag/format_char_diff_mean": metrics["train_format_char_diff_mean"],
+                    "train_diag/text_mismatch_char_diff_mean": metrics["train_text_mismatch_char_diff_mean"],
+                    "train_diag/text_mismatch_char_diff_p95": metrics["train_text_mismatch_char_diff_p95"],
+                    "train_diag/text_mismatch_char_diff_max": metrics["train_text_mismatch_char_diff_max"],
                     "timing/save_weights_s": metrics["timing_save_weights_s"],
                     "timing/fwd_bwd_s": metrics["timing_fwd_bwd_s"],
                     "timing/optim_s": metrics["timing_optim_s"],
                 }
                 if metrics.get("_train_ai_tell_scores"):
-                    train_log_data["train/hist_ai_tell_scores"] = wandb.Histogram(metrics["_train_ai_tell_scores"])
+                    train_log_data["train_diag/hist_ai_tell_scores"] = wandb.Histogram(metrics["_train_ai_tell_scores"])
                 if metrics.get("_train_human_tell_scores"):
-                    train_log_data["train/hist_human_tell_scores"] = wandb.Histogram(metrics["_train_human_tell_scores"])
+                    train_log_data["train_diag/hist_human_tell_scores"] = wandb.Histogram(metrics["_train_human_tell_scores"])
                 wandb.log(train_log_data, step=step)
 
             logger.info(
@@ -709,15 +770,23 @@ async def main():
             if step % EVAL_EVERY_STEPS == 0 and eval_docs:
                 eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
                 if CFG.wandb.enabled:
-                    eval_log_data = {
-                        (f"eval/{k[len('eval_'):]}" if k.startswith("eval_") else k): v
-                        for k, v in eval_metrics.items()
-                        if not k.startswith("_")
+                    eval_core = {
+                        "eval_reward_mean",
+                        "eval_format_rate",
+                        "eval_n_excluded_rollouts",
+                        "eval_auroc",
+                        "eval_tpr_at_fpr_001",
                     }
+                    eval_log_data = {}
+                    for k, v in eval_metrics.items():
+                        if k.startswith("_") or not k.startswith("eval_"):
+                            continue
+                        prefix = "eval" if k in eval_core else "eval_diag"
+                        eval_log_data[f"{prefix}/{k[len('eval_'):]}"] = v
                     if eval_metrics.get("_eval_ai_scores"):
-                        eval_log_data["eval/hist_ai_scores"] = wandb.Histogram(eval_metrics["_eval_ai_scores"])
+                        eval_log_data["eval_diag/hist_ai_scores"] = wandb.Histogram(eval_metrics["_eval_ai_scores"])
                     if eval_metrics.get("_eval_human_scores"):
-                        eval_log_data["eval/hist_human_scores"] = wandb.Histogram(eval_metrics["_eval_human_scores"])
+                        eval_log_data["eval_diag/hist_human_scores"] = wandb.Histogram(eval_metrics["_eval_human_scores"])
                     wandb.log(eval_log_data, step=step)
                 if eval_metrics["eval_auroc"] > best_eval_auroc:
                     best_eval_auroc = eval_metrics["eval_auroc"]

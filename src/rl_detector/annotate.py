@@ -13,6 +13,7 @@ from rl_detector.config import CFG
 from rl_detector.frozen import aggregate, get_client, rank_indicators
 from rl_detector.prompts import neutral
 from rl_detector.rewards import parse_indicators
+from rl_detector.rollouts import extract_response_text
 
 BASE_MODEL = CFG.model.base_model
 logger = logging.getLogger(__name__)
@@ -171,14 +172,15 @@ async def annotate_with_runtime(document: str, runtime: dict, progress_cb=None) 
         ),
     )
     output = tokenizer.decode(sampled.sequences[0].tokens)
+    response_text = extract_response_text(output)
 
-    indicators = parse_indicators(output) or []
+    indicators = parse_indicators(response_text) or []
     logger.info("annotate | parsed %d indicators", len(indicators))
     await _emit_progress(progress_cb, 65, "Parsed indicators")
     frozen_client = get_client()
     logger.info("annotate | ranking indicators with frozen model")
     await _emit_progress(progress_cb, 80, "Scoring indicators")
-    frozen_scored = await rank_indicators(frozen_client, output, indicators) if indicators else []
+    frozen_scored = await rank_indicators(frozen_client, response_text, indicators) if indicators else []
     agg = aggregate(frozen_scored)
     scores = [s["score"] for s in frozen_scored]
     html = render_html(document, indicators, scores)
