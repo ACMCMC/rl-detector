@@ -6,14 +6,11 @@ from rl_detector.config import CFG
 INSTRUCTIONS = """\
 Rules:
 - Reproduce the ENTIRE main text exactly as given, word for word, with no changes
-- Wrap each notable "tell" of AI generation or human authorship with <tell explanation="EXPLANATION" type="TYPE">TEXT</tell> tags
-- In every <tell> tag, attribute values MUST use double quotes only, never single quotes
+- Wrap each notable <tell> of AI generation or human authorship with <tell explanation="EXPLANATION" type="TYPE">TEXT</tell> tags
 - EXPLANATION is a short comment explaining why you think this is a tell. Ensure that you clearly explain and convince the reader why this is a tell
-- TYPE must exactly be "AI" or "human". Every <tell> tag MUST have a type attribute
-- Add at least one <tell> tag in the main document
-- Don't use a predetermined number of tells. Instead, use your judgment to identify where tells occur in the text, which may be dense or sparse. Some documents may have many tells, others may have few
+- Don't use a predetermined number of tells. Instead, use your judgment to identify where tells occur in the text
 - Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative in identifying tells, using your full knowledge and intuition to have varied and insightful explanations
-- Get into the head of each writer: consider the intentions, capabilities, attributes and limitations of both human writers and AI models
+- Get into the head of the writer: consider the intentions, capabilities, attributes and limitations of both human writers and AI models
 - Keep tells short, focused, and specific to particular phrases, words or characters in the text
 - Preserve every character outside the tags exactly, including punctuation, spacing, capitalization, and line breaks
 - COPY THE MAIN TEXT CHARACTER BY CHARACTER; preserve all punctuation, spacing, capitalization, and line breaks exactly
@@ -41,7 +38,7 @@ def contrastive(main_text: str, contrast_text: str, contrast_label: int, main_la
             main_label_hint=main_label_hint,
             show_labels=show_labels,
         )
-        fewshot_block = f"- Here is one style example of valid tells; this is just a style reference, not a template to copy\n{fewshot}"
+        fewshot_block = f"Here is one example of how to annotate a document, with explanations for each tell:\n```\n{fewshot}\n```\n"
     else:
         fewshot_block = ""
 
@@ -54,9 +51,9 @@ You will be given two documents, a reference document and a main document.
 - Do not reference the reference document in your explanations, this is secret information for you to use in your analysis, not something to mention explicitly in the output
 - You should use the reference document as a guide to see how AI and human writing can differ, but do not assume that the main document will have the same style or same types of tells as the reference document
 - You should carefully inspect both documents and their origins to see how you can tell them apart
-{fewshot_block}
 - Your final output must contain only the annotated main document. Never output any part of the reference document
-- The main document comes last, and your answer should reproduce only that text
+
+{fewshot_block}
 
 {reference_header}
 ```
