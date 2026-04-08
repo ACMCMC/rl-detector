@@ -32,7 +32,7 @@ frozen:
   model: "openai/gpt-oss-120b"
   gemini_model: "gemini-2.5-pro-preview-05-06"
   seed: 2262
-  max_concurrent: 32         # max parallel requests
+  max_concurrent: 128         # max parallel requests
   max_tokens: 8192
   reasoning_effort: "medium"    # deepinfra: reasoning_effort; gemini: thinking_level (low/medium/high)
 
