@@ -5,7 +5,7 @@ import logging
 import os
 import re
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 
 from rl_detector.config import CFG
 from rl_detector.prompts import FROZEN_SCORE_PROMPT
@@ -77,14 +77,25 @@ async def rank_indicators(
     async with sem:
         in_use_after = CFG.frozen.max_concurrent - sem._value
         logger.info("frozen | acquired semaphore slot (%d tells, in_use=%d/%d)", n, in_use_after, CFG.frozen.max_concurrent)
-        response = await client.chat.completions.create(
-            model=CFG.frozen.model,
-            messages=[{"role": "user", "content": prompt}],
-            seed=CFG.frozen.seed,
-            temperature=0.0,
-            max_tokens=CFG.frozen.max_tokens,
-            reasoning_effort=CFG.frozen.reasoning_effort,
-        )
+        _MAX_RETRIES = 6
+        _BASE_DELAY = 2.0
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = await client.chat.completions.create(
+                    model=CFG.frozen.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    seed=CFG.frozen.seed,
+                    temperature=0.0,
+                    max_tokens=CFG.frozen.max_tokens,
+                    reasoning_effort=CFG.frozen.reasoning_effort,
+                )
+                break
+            except RateLimitError as e:
+                if attempt == _MAX_RETRIES - 1:
+                    raise
+                delay = _BASE_DELAY * (2 ** attempt)
+                logger.warning("frozen | 429 rate limit (attempt %d/%d), retrying in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
+                await asyncio.sleep(delay)
     logger.info("frozen | released semaphore slot (%d tells)", n)
     content = response.choices[0].message.content or ""
     logger.debug("frozen model raw response: %r", content)

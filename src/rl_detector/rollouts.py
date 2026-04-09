@@ -1,12 +1,90 @@
 """Generate rollouts from the current policy using contrastive (teacher) prompts."""
 
 import asyncio
+import logging
 import re
+from difflib import SequenceMatcher
 
 import tinker
 
 from rl_detector.config import CFG
 from rl_detector.prompts import contrastive
+
+logger = logging.getLogger(__name__)
+
+_TELL_TAG_RE = re.compile(r"<tell\b[^>]*>|</tell>")
+
+
+def _strip_tags(text: str) -> str:
+    return _TELL_TAG_RE.sub("", text)
+
+
+def try_fix_response(response_text: str, document: str, max_fix_ratio: float = 0.05) -> str | None:
+    """
+    If the stripped response is close to document (< max_fix_ratio of chars changed),
+    patch response_text so the stripped version matches document exactly.
+    Tag structure is preserved; only non-tag text is corrected.
+    Returns the fixed response_text, or None if the diff is too large or can't be applied cleanly.
+    """
+    stripped = _strip_tags(response_text)
+    if stripped == document:
+        return None
+
+    matcher = SequenceMatcher(None, stripped, document, autojunk=False)
+    opcodes = matcher.get_opcodes()
+
+    n_changed = sum(i2 - i1 for tag, i1, i2, j1, j2 in opcodes if tag != "equal")
+    if n_changed == 0 or n_changed / max(len(document), 1) > max_fix_ratio:
+        return None
+
+    # Build mapping: stripped index → position in response_text, skipping tag spans.
+    s2r: list[int] = []
+    ri = 0
+    while ri < len(response_text) and len(s2r) < len(stripped):
+        if response_text[ri] == "<":
+            end = response_text.find(">", ri)
+            if end != -1:
+                ri = end + 1
+                continue
+        s2r.append(ri)
+        ri += 1
+
+    if len(s2r) != len(stripped):
+        return None  # tag parse failed
+
+    result: list[str] = []
+    prev = 0
+    for opcode, i1, i2, j1, j2 in opcodes:
+        if opcode == "equal":
+            if i2 > i1:
+                end = s2r[i2 - 1] + 1
+                result.append(response_text[prev:end])
+                prev = end
+        elif opcode == "replace":
+            start = s2r[i1] if i1 < len(s2r) else len(response_text)
+            result.append(response_text[prev:start])
+            result.append(document[j1:j2])
+            end = (s2r[i2 - 1] + 1) if 0 < i2 <= len(s2r) else start
+            prev = end
+        elif opcode == "delete":
+            start = s2r[i1] if i1 < len(s2r) else len(response_text)
+            result.append(response_text[prev:start])
+            end = (s2r[i2 - 1] + 1) if 0 < i2 <= len(s2r) else start
+            prev = end
+        elif opcode == "insert":
+            pos = s2r[i1] if i1 < len(s2r) else len(response_text)
+            result.append(response_text[prev:pos])
+            result.append(document[j1:j2])
+            prev = pos
+
+    result.append(response_text[prev:])
+    fixed = "".join(result)
+
+    if _strip_tags(fixed) != document:
+        return None
+
+    return fixed
+
 
 _CHANNEL_BLOCK_RE = re.compile(
     r"<\|channel\|>\s*([^<\s]+)\s*<\|message\|>(.*?)(?=(?:<\|channel\|>)|(?:<\|end\|>)|(?:<\|return\|>)|$)",
@@ -98,14 +176,46 @@ async def generate_rollouts(
 
         completion_text = tokenizer.decode(completion_tokens)
 
+        response_text = extract_response_text(completion_text)
+        fixed = try_fix_response(response_text, document)
+        wrong_response_text = None
+        was_text_fixed = False
+        if fixed is not None:
+            wrong_response_text = response_text
+            response_text = fixed
+            if wrong_response_text in completion_text:
+                completion_text = completion_text.replace(wrong_response_text, fixed, 1)
+            else:
+                logger.warning("rollout %d: response_text not found verbatim in completion_text, using fixed response as completion", i)
+                completion_text = fixed
+            completion_tokens = tokenizer.encode(completion_text, add_special_tokens=False)
+            was_text_fixed = True
+            logger.info("rollout %d: fixed %d char(s) of typo in response_text", i, sum(i2 - i1 for tag, i1, i2, j1, j2 in SequenceMatcher(None, wrong_response_text, fixed).get_opcodes() if tag != "equal"))
+
+        # Find where the response starts within completion_text so we can mask
+        # reasoning tokens from the loss. The reasoning trace is conditioned on
+        # the directed prompt (contrast doc, hints) and is incomparable under the
+        # neutral prompt, so it should not contribute to the gradient or IS ratio.
+        response_start_idx = completion_text.find(response_text)
+        if response_start_idx >= 0:
+            prefix = completion_text[:response_start_idx]
+            n_reasoning_tokens = len(tokenizer.encode(prefix, add_special_tokens=False))
+        else:
+            # response_text not found verbatim — treat all tokens as response (no masking)
+            logger.warning("rollout %d: could not locate response_text in completion_text, n_reasoning_tokens=0", i)
+            n_reasoning_tokens = 0
+
         return {
             "completion_text": completion_text,
-            "response_text": extract_response_text(completion_text),
+            "response_text": response_text,
             "completion_tokens": completion_tokens,
             "completion_logprobs": completion_logprobs,
+            "n_reasoning_tokens": n_reasoning_tokens,
             "contrast_label": contrast["label"],
             "main_label_hint": main_label_hint,
             "show_labels": show_labels,
+            "was_text_fixed": was_text_fixed,
+            "wrong_response_text": wrong_response_text,
         }
 
     tasks = [_sample_one(i, contrast, main_label_hints[i], show_labels_flags[i]) for i, contrast in enumerate(contrast_docs)]

@@ -7,19 +7,20 @@ model:
   lora_rank: 32
 
 training:
-  k: 8                       # rollouts per document (K/2 AI-directed, K/2 human-directed)
-  docs_per_step: 4           # documents per GRPO step (half AI, half human)
+  k: 16                      # rollouts per document (K/2 AI-directed, K/2 human-directed)
+  docs_per_step: 16           # documents per GRPO step (half AI, half human)
   use_fewshot_examples: true
   label_noise_correct_prob: 0.40
   label_noise_flip_prob: 0.30
   label_noise_unknown_prob: 0.30
-  learning_rate: 5.0e-5
+  learning_rate: 1.0e-4
   max_steps: 100
   checkpoint_every: 5        # save Tinker checkpoint every N steps
   audit_log_path: "audit_log.jsonl"
-  granularity_weight: 0.15
-  margin_weight: 0.35
+  granularity_weight: 0.0
+  margin_weight: 0.0
   margin_target: 0.45
+  group_variance_top_p: 0.9  # keep only the top-p fraction of docs by reward variance; 1.0 = no filtering
 
 sampling:
   max_tokens: 8192
@@ -32,7 +33,7 @@ frozen:
   model: "openai/gpt-oss-120b"
   gemini_model: "gemini-2.5-pro-preview-05-06"
   seed: 2262
-  max_concurrent: 128         # max parallel requests
+  max_concurrent: 512         # max parallel requests
   max_tokens: 8192
   reasoning_effort: "medium"    # deepinfra: reasoning_effort; gemini: thinking_level (low/medium/high)
 

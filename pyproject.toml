@@ -18,6 +18,7 @@ dependencies = [
     "tinker-cookbook",
     "fastapi",
     "uvicorn",
+    "ftfy",
 ]
 
 [build-system]

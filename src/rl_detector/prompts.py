@@ -15,8 +15,7 @@ Rules:
 - Tells can be about linguistic style, content, formatting, inconsistencies, semantics, grammar, or anything else that informs the judgment. Be creative in identifying tells, using your full knowledge and intuition to have varied and insightful explanations
 - Get into the head of each writer: consider the intention and the context of the writing to act as a detective uncovering the subtle clues and inconsistencies that reveal the origin of the text
 - Keep tells short, focused, and specific to particular phrases, words or characters in the text
-- Preserve every character outside the tags exactly, including punctuation, spacing, capitalization, and line breaks
-- COPY THE MAIN TEXT CHARACTER BY CHARACTER; preserve all punctuation, spacing, capitalization, and line breaks exactly
+- COPY THE MAIN TEXT CHARACTER BY CHARACTER, including punctuation, spacing, capitalization, and line breaks. Also preserve the Unicode characters and formatting of the original text, (i.e. ‑ is not the same as -). And if the original text has typos, missing punctuation, or any other "imperfections", reproduce those exactly as they are, we need the output to be exactly identical to the input text
 - OUTPUT ONLY THE ORIGINAL MAIN TEXT WITH <tell ...> TAGS INSERTED; DO NOT OUTPUT ANY EXPLANATION, ANALYSIS, REASONING, PREFACE, OR EXTRA TEXT"""
 
 

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # expose BASE_MODEL for annotate.py
 BASE_MODEL = CFG.model.base_model
-EVAL_SAMPLE_SIZE = 25
+EVAL_SAMPLE_SIZE = 50
 EVAL_EVERY_STEPS = 5
 EVAL_SEED = 2262
 GLOBAL_SEED = 2262
@@ -236,6 +237,7 @@ def build_datum(
     completion_tokens: list[int],
     completion_logprobs: list[float],
     advantage: float,
+    n_reasoning_tokens: int = 0,
 ) -> tinker.Datum:
     """
     Build a Datum for importance-sampling GRPO.
@@ -243,19 +245,24 @@ def build_datum(
     Full sequence: [neutral_prompt... | completion...]
     model_input:   full_seq[:-1]   (right-shifted)
     target_tokens: full_seq[1:]    (left-shifted)
-    logprobs:      [0]*(N-1) + completion_logprobs    (old logprobs from directed sampling)
-    advantages:    [0]*(N-1) + [advantage]*M
-    mask:          [0.0]*(N-1) + [1.0]*M             (train only on completion)
+    logprobs:      [0]*(N-1) + [0]*R + response_logprobs
+    advantages:    [0]*(N-1) + [0]*R + [advantage]*S
+    mask:          [0.0]*(N-1) + [0.0]*R + [1.0]*S
+
+    where R = n_reasoning_tokens (masked out — conditioned on directed prompt,
+    incomparable under neutral prompt) and S = len(completion_tokens) - R.
     """
     N = len(neutral_tokens)
     M = len(completion_tokens)
+    R = min(n_reasoning_tokens, M)   # reasoning tokens to mask
+    S = M - R                        # response tokens to train on
     full_seq = neutral_tokens + completion_tokens
 
     input_tokens = full_seq[:-1]      # length N+M-1
     target_tokens = full_seq[1:]      # length N+M-1
 
-    logprobs = [0.0] * (N - 1) + completion_logprobs
-    advantages = [0.0] * (N - 1) + [advantage] * M
+    logprobs = [0.0] * (N - 1) + [0.0] * R + completion_logprobs[R:]
+    advantages = [0.0] * (N - 1) + [0.0] * R + [advantage] * S
 
     assert len(input_tokens) == len(target_tokens) == len(logprobs) == len(advantages)
 
@@ -337,7 +344,9 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
     )
     dt_rollouts = time.perf_counter() - t0_rollouts
     n_tells_per_rollout = [len(parse_indicators(r["response_text"]) or []) for r in rollouts]
+    n_reasoning_tokens_per_rollout = [r.get("n_reasoning_tokens", 0) for r in rollouts]
     logger.info("rollouts | done in %.1fs — tells per rollout: %s", dt_rollouts, n_tells_per_rollout)
+    logger.info("rollouts | reasoning tokens masked (per rollout): %s", n_reasoning_tokens_per_rollout)
 
     # Re-score each completion under the neutral prompt so that the old logprobs
     # used for importance sampling match the distribution we actually train on.
@@ -356,10 +365,29 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
     t0_rescore = time.perf_counter()
     neutral_logprobs_list = await asyncio.gather(*[rescore_under_neutral(r) for r in rollouts])
     dt_rescore = time.perf_counter() - t0_rescore
+    # Compute IS ratios before overwriting logprobs: ratio = exp(sum(neutral - directed)).
+    # Values << 1 mean the completion is much more likely under the directed prompt than neutral.
+    is_ratios = []
     for r, neutral_lps in zip(rollouts, neutral_logprobs_list):
+        directed_lps = r["completion_logprobs"]
+        R = r.get("n_reasoning_tokens", 0)
+        # IS ratio computed only over response tokens — reasoning tokens are
+        # conditioned on the directed prompt and must not contribute.
+        n = min(len(neutral_lps), len(directed_lps))
+        log_ratio = sum(neutral_lps[j] - directed_lps[j] for j in range(R, n)) if n > R else 0.0
+        is_ratios.append(math.exp(max(-20.0, min(20.0, log_ratio))))
         r["completion_logprobs"] = neutral_lps
-    logger.info("rollouts | re-scoring done in %.1fs", dt_rescore)
+    is_ratio_mean = sum(is_ratios) / len(is_ratios) if is_ratios else 1.0
+    is_ratio_min = min(is_ratios) if is_ratios else 1.0
+    is_ratio_max = max(is_ratios) if is_ratios else 1.0
+    logger.info(
+        "rollouts | re-scoring done in %.1fs — IS ratios: mean=%.4f min=%.4f max=%.4f",
+        dt_rescore, is_ratio_mean, is_ratio_min, is_ratio_max,
+    )
 
+    import json
+    import pathlib
+    AUDIT_FORMAT_FAIL_PATH = getattr(CFG.training, "format_fail_audit_path", "format_fail_audit.jsonl")
     async def score_and_reward(i, r):
         response_text = r["response_text"]
         indicators = parse_indicators(response_text) or []
@@ -377,6 +405,27 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
                 format_reason,
                 format_char_diff,
             )
+            # Write failed format example to audit file
+            fail_obj = {
+                "doc_id": doc.get("id", None),
+                "doc_label": label,
+                "rollout_index": i,
+                "contrast_label": r["contrast_label"],
+                "noise_mode": r.get("noise_mode"),
+                "main_label_hint": r.get("main_label_hint"),
+                "show_labels": r.get("show_labels"),
+                "format_reason": format_reason,
+                "format_char_diff": format_char_diff,
+                "input_text": document,
+                "response_text": response_text,
+                "was_text_fixed": r.get("was_text_fixed"),
+                "wrong_response_text": r.get("wrong_response_text"),
+                "indicators": indicators,
+                "format_diag": fmt,
+            }
+            pathlib.Path(AUDIT_FORMAT_FAIL_PATH).parent.mkdir(parents=True, exist_ok=True)
+            with open(AUDIT_FORMAT_FAIL_PATH, "a") as f:
+                f.write(json.dumps(fail_obj, ensure_ascii=False) + "\n")
             return indicators, [], 0.0, True, f"format:{format_reason}", False, 0.0, format_char_diff
         t0_frozen = time.perf_counter()
         frozen_scored = await rank_indicators(frozen_client, response_text, indicators) if indicators else []
@@ -424,6 +473,7 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
             r["completion_tokens"],
             r["completion_logprobs"],
             adv,
+            n_reasoning_tokens=r.get("n_reasoning_tokens", 0),
         )
         datums.append(datum)
 
@@ -455,6 +505,8 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
                 "format_ok": format_ok_flags[i],
                 "completion_text": r["completion_text"],
                 "response_text": r["response_text"],
+                "was_text_fixed": r.get("was_text_fixed", False),
+                "wrong_response_text": r.get("wrong_response_text"),
                 "completion_tokens_len": len(r["completion_tokens"]),
                 "completion_logprobs_len": len(r["completion_logprobs"]),
                 "format_char_diff_count": format_char_diffs[i],
@@ -505,6 +557,32 @@ async def train_step(
             for i, doc in enumerate(docs)
         ]
     )
+
+    # Top-p group variance filtering: drop groups where reward variance is low,
+    # since the model is already consistent there and contributes little gradient.
+    top_p = getattr(CFG.training, "group_variance_top_p", 1.0)
+    if top_p < 1.0 and doc_results:
+        def _group_variance(doc_result):
+            _, doc_audit = doc_result
+            rewards = [ro["reward"] for ro in doc_audit["rollouts"] if ro.get("used_for_optimization") and ro["reward"] is not None]
+            if len(rewards) < 2:
+                return 0.0
+            mean = sum(rewards) / len(rewards)
+            return sum((r - mean) ** 2 for r in rewards) / len(rewards)
+
+        variances = [_group_variance(dr) for dr in doc_results]
+        n_keep = max(1, round(top_p * len(doc_results)))
+        sorted_indices = sorted(range(len(doc_results)), key=lambda i: variances[i], reverse=True)
+        keep_set = set(sorted_indices[:n_keep])
+        n_dropped = len(doc_results) - len(keep_set)
+        if n_dropped > 0:
+            logger.info(
+                "step %d | group_variance_top_p=%.2f: dropping %d/%d low-variance docs (variances: kept min=%.4f, dropped max=%.4f)",
+                step, top_p, n_dropped, len(doc_results),
+                min(variances[i] for i in keep_set),
+                max((variances[i] for i in range(len(doc_results)) if i not in keep_set), default=0.0),
+            )
+        doc_results = [dr for i, dr in enumerate(doc_results) if i in keep_set]
 
     all_datums = []
     docs_audit = []

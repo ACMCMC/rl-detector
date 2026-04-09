@@ -4,6 +4,8 @@ import math
 import re
 from difflib import SequenceMatcher
 
+import ftfy
+
 from rl_detector.config import CFG
 
 # Weight of the granularity bonus relative to the calibration reward.
@@ -13,6 +15,11 @@ _GRANULARITY_WEIGHT = float(getattr(CFG.training, "granularity_weight", 0.05))
 _MARGIN_WEIGHT = float(getattr(CFG.training, "margin_weight", 0.35))
 _MARGIN_TARGET = float(getattr(CFG.training, "margin_target", 0.45))
 _MARGIN_SIGMOID_BETA = 8.0
+
+def _normalize(text: str) -> str:
+    """Normalize unicode for format comparison using ftfy."""
+    return ftfy.fix_text(text)
+
 
 _TELL_TAG_RE = re.compile(r"<tell\b([^>]*)>(.*?)</tell>", re.DOTALL)
 _ATTR_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*"([^"]*)"')
@@ -45,7 +52,6 @@ def parse_indicators(output: str) -> list[dict] | None:
 def strip_tags(tagged_text: str) -> str:
     """Remove all <tell ...> and </tell> tags, keeping the inner text."""
     return re.sub(r"</tell>|<tell\b[^>]*>", "", tagged_text)
-
 
 def format_reward(output: str, document: str) -> float:
     """
@@ -92,7 +98,7 @@ def format_diagnostics(output: str, document: str) -> dict[str, int | str | bool
                 "char_diff_count": stripped_char_diff_count(stripped, document),
             }
     stripped = strip_tags(final)
-    if stripped != document:
+    if stripped != document and _normalize(stripped) != _normalize(document):
         return {
             "ok": False,
             "reason": "text_mismatch",
@@ -152,10 +158,12 @@ def compute_reward(
     frozen_scored: list[dict],
 ) -> float:
     """
-    Combined reward. Format is a gate: if 0, return 0.
-    Main signal: calibration (classification correctness).
-    Extra signal: margin objective to push confident separation, not just correct sign.
-    Minor signal: granularity bonus for many short tells over one long tell.
+    Combined reward in [0, 1]. Format is a gate: if format is invalid, return 0.
+    Main signal: calibration_reward (correct classification direction).
+    Optional signals (controlled by config weights, currently both 0):
+      - margin_reward: push toward confident separation beyond the target margin.
+      - granularity_reward: bonus for many short tells vs. one long tell.
+    When both weights are 0, reward equals calibration_reward ∈ [0, 1].
     """
     if format_reward(output, document) == 0.0:
         return 0.0
@@ -164,7 +172,9 @@ def compute_reward(
     cal = calibration_reward(agg, label)
     mar = margin_reward(agg, label)
     gran = granularity_reward(len(frozen_scored))
-    return cal + _MARGIN_WEIGHT * mar + _GRANULARITY_WEIGHT * gran
+    total = cal + _MARGIN_WEIGHT * mar + _GRANULARITY_WEIGHT * gran
+    denom = 1.0 + _MARGIN_WEIGHT + _GRANULARITY_WEIGHT
+    return total / denom
 
 
 def compute_advantages(rewards: list[float]) -> list[float]:
