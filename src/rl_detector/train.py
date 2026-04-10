@@ -139,12 +139,13 @@ async def _sample_standard_rollout(sampling_client, tokenizer, document: str) ->
     }
 
 
-async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: list[dict], step: int | str) -> dict:
+async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: list[dict], step: int | str, eval_audit_path: str | None = None) -> dict:
     logger.info("eval | step %s | evaluating %d test docs with neutral prompt", step, len(eval_docs))
     sampling_client = await training_client.save_weights_and_get_sampling_client_async()
 
     async def score_eval_doc(doc):
         rollout = await _sample_standard_rollout(sampling_client, tokenizer, doc["text"])
+        completion_text = rollout["completion_text"]
         response_text = rollout["response_text"]
         indicators = parse_indicators(response_text) or []
         fmt = format_diagnostics(response_text, doc["text"])
@@ -152,15 +153,43 @@ async def _evaluate_model(training_client, tokenizer, frozen_client, eval_docs: 
         format_reason = str(fmt["reason"])
         format_char_diff = int(fmt["char_diff_count"])
         if not format_ok:
-            return 0.0, True, False, f"format:{format_reason}", None, doc["label"], format_char_diff
+            return 0.0, True, False, f"format:{format_reason}", None, doc["label"], format_char_diff, completion_text, response_text, indicators, []
         frozen_scored = await rank_indicators(frozen_client, response_text, indicators) if indicators else []
         if indicators and frozen_scored is None:
-            return None, False, True, "frozen_parse_failed", None, doc["label"], 0
+            return None, False, True, "frozen_parse_failed", None, doc["label"], 0, completion_text, response_text, indicators, []
         reward = compute_reward(response_text, doc["text"], doc["label"], frozen_scored)
         agg_score = sum(s["score"] for s in frozen_scored) / len(frozen_scored) if frozen_scored else 0.0
-        return reward, True, True, "ok", agg_score, doc["label"], 0
+        return reward, True, True, "ok", agg_score, doc["label"], format_char_diff, completion_text, response_text, indicators, frozen_scored
 
     results = await asyncio.gather(*[score_eval_doc(doc) for doc in eval_docs])
+
+    if eval_audit_path:
+        import pathlib
+        pathlib.Path(eval_audit_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(eval_audit_path, "a") as f:
+            doc_traces = []
+            for doc, res in zip(eval_docs, results):
+                reward, format_used, frozen_used, reason, agg_score, label, char_diff, completion_text, response_text, indicators, frozen_scored = res
+                doc_traces.append({
+                    "doc_id": doc.get("id"),
+                    "label": label,
+                    "reward": reward,
+                    "agg_score": agg_score,
+                    "format_reason": reason,
+                    "format_char_diff": char_diff,
+                    "completion_text": completion_text,
+                    "response_text": response_text,
+                    "indicators": [
+                        {
+                            "span_text": ind["span_text"],
+                            "explanation": ind["explanation"],
+                            "type": ind.get("type"),
+                            "frozen_score": fs["score"],
+                        }
+                        for ind, fs in zip(indicators, frozen_scored)
+                    ],
+                })
+            f.write(json.dumps({"step": step, "docs": doc_traces}, ensure_ascii=False) + "\n")
     rewards = [0.0 if res[0] is None else res[0] for res in results if res[1]]
     format_ok_flags = [res[2] for res in results if res[1]]
     n_excluded = sum(1 for res in results if not res[1])
@@ -526,7 +555,13 @@ async def _process_doc(sampling_client, tokenizer, frozen_client, doc, all_docs:
         ],
     }
 
-    return datums, doc_audit
+    doc_timing = {
+        "dt_rollouts": dt_rollouts,
+        "dt_rescore": dt_rescore,
+        "dt_scoring": dt_scoring,
+        "dt_frozen_mean": dt_frozen_mean,
+    }
+    return datums, doc_audit, doc_timing
 
 
 async def train_step(
@@ -563,7 +598,7 @@ async def train_step(
     top_p = getattr(CFG.training, "group_variance_top_p", 1.0)
     if top_p < 1.0 and doc_results:
         def _group_variance(doc_result):
-            _, doc_audit = doc_result
+            _, doc_audit, _dt = doc_result
             rewards = [ro["reward"] for ro in doc_audit["rollouts"] if ro.get("used_for_optimization") and ro["reward"] is not None]
             if len(rewards) < 2:
                 return 0.0
@@ -586,9 +621,11 @@ async def train_step(
 
     all_datums = []
     docs_audit = []
-    for datums, doc_audit in doc_results:
+    doc_timings = []
+    for datums, doc_audit, doc_timing in doc_results:
         all_datums.extend(datums)
         docs_audit.append(doc_audit)
+        doc_timings.append(doc_timing)
 
     if not all_datums:
         logger.warning("step %d | no valid datums, skipping update", step)
@@ -700,10 +737,20 @@ async def train_step(
     audit_log.write(json.dumps(audit_entry) + "\n")
     audit_log.flush()
 
+    def _mean(vals): return sum(vals) / len(vals) if vals else 0.0
+    dt_rollouts_mean = _mean([t["dt_rollouts"] for t in doc_timings])
+    dt_rescore_mean = _mean([t["dt_rescore"] for t in doc_timings])
+    dt_scoring_mean = _mean([t["dt_scoring"] for t in doc_timings])
+    dt_frozen_mean_mean = _mean([t["dt_frozen_mean"] for t in doc_timings])
+
     step_total_dt = dt_save + fb_dt + opt_dt  # excludes doc processing (runs in parallel)
     logger.info(
         "timing   | step %d: save_weights=%.1fs fwd_bwd=%.1fs optim=%.1fs | step_total=%.1fs",
         step, dt_save, fb_dt, opt_dt, step_total_dt,
+    )
+    logger.info(
+        "timing   | step %d (per-doc means): rollouts=%.1fs rescore=%.1fs scoring=%.1fs frozen/rollout=%.1fs",
+        step, dt_rollouts_mean, dt_rescore_mean, dt_scoring_mean, dt_frozen_mean_mean,
     )
 
     return {
@@ -743,10 +790,14 @@ async def train_step(
         "timing_save_weights_s": dt_save,
         "timing_fwd_bwd_s": fb_dt,
         "timing_optim_s": opt_dt,
+        "timing_rollouts_mean_s": dt_rollouts_mean,
+        "timing_rescore_mean_s": dt_rescore_mean,
+        "timing_scoring_mean_s": dt_scoring_mean,
+        "timing_frozen_per_rollout_mean_s": dt_frozen_mean_mean,
     }
 
 
-async def main():
+async def main(resume: str | None = None, resume_step: int = 0):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     # single seed for reproducible startup and training behavior
@@ -789,13 +840,18 @@ async def main():
         logger.info("startup | dataset ready (%d docs)", len(docs))
         return docs
 
-    logger.info("startup | creating LoRA training client (base_model=%s, rank=%d) + loading tokenizer and dataset in parallel...", CFG.model.base_model, CFG.model.lora_rank)
-    training_client, tokenizer, all_docs, test_docs = await asyncio.gather(
-        service_client.create_lora_training_client_async(
+    if resume:
+        logger.info("startup | resuming from checkpoint %s (step offset=%d), rank=%d + loading tokenizer and dataset in parallel...", resume, resume_step, CFG.model.lora_rank)
+        training_client_coro = service_client.create_training_client_from_state_with_optimizer_async(path=resume)
+    else:
+        logger.info("startup | creating LoRA training client (base_model=%s, rank=%d) + loading tokenizer and dataset in parallel...", CFG.model.base_model, CFG.model.lora_rank)
+        training_client_coro = service_client.create_lora_training_client_async(
             base_model=CFG.model.base_model,
             rank=CFG.model.lora_rank,
             seed=GLOBAL_SEED,
-        ),
+        )
+    training_client, tokenizer, all_docs, test_docs = await asyncio.gather(
+        training_client_coro,
         loop.run_in_executor(None, _load_tokenizer),
         loop.run_in_executor(None, _load_dataset),
         loop.run_in_executor(None, lambda: load_docs(split="test")),
@@ -805,12 +861,12 @@ async def main():
     eval_docs = _select_eval_docs(test_docs)
 
     frozen_client = get_client()
-    step = 0
+    step = resume_step
     best_eval_auroc = float("-inf")
     best_eval_path = None
     with open(CFG.training.audit_log_path, "w") as audit_log:
         if eval_docs:
-            eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
+            eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step, eval_audit_path=CFG.training.eval_audit_log_path)
             if CFG.wandb.enabled:
                 eval_core = {
                     "eval_reward_mean",
@@ -883,6 +939,10 @@ async def main():
                     "timing/save_weights_s": metrics["timing_save_weights_s"],
                     "timing/fwd_bwd_s": metrics["timing_fwd_bwd_s"],
                     "timing/optim_s": metrics["timing_optim_s"],
+                    "timing/rollouts_mean_s": metrics["timing_rollouts_mean_s"],
+                    "timing/rescore_mean_s": metrics["timing_rescore_mean_s"],
+                    "timing/scoring_mean_s": metrics["timing_scoring_mean_s"],
+                    "timing/frozen_per_rollout_mean_s": metrics["timing_frozen_per_rollout_mean_s"],
                 }
                 if metrics.get("_train_ai_tell_scores"):
                     train_log_data["train_diag/hist_ai_tell_scores"] = wandb.Histogram(metrics["_train_ai_tell_scores"])
@@ -899,7 +959,7 @@ async def main():
             step += 1
 
             if step % EVAL_EVERY_STEPS == 0 and eval_docs:
-                eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step)
+                eval_metrics = await _evaluate_model(training_client, tokenizer, frozen_client, eval_docs, step, eval_audit_path=CFG.training.eval_audit_log_path)
                 if CFG.wandb.enabled:
                     eval_core = {
                         "eval_reward_mean",
@@ -951,4 +1011,20 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    parser = argparse.ArgumentParser(description="GRPO training loop")
+    parser.add_argument(
+        "--resume",
+        metavar="TINKER_PATH",
+        default=None,
+        help="Tinker checkpoint path to resume from, e.g. tinker://run-id/weights/checkpoint-001. Restores weights and optimizer state.",
+    )
+    parser.add_argument(
+        "--resume-step",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Training step to start counting from when resuming (default: 0).",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(resume=args.resume, resume_step=args.resume_step))

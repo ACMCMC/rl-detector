@@ -8,8 +8,9 @@ model:
 
 training:
   k: 16                      # rollouts per document (K/2 AI-directed, K/2 human-directed)
-  docs_per_step: 16           # documents per GRPO step (half AI, half human)
-  use_fewshot_examples: true
+  docs_per_step: 8           # documents per GRPO step (half AI, half human)
+  use_contrastive: false         # use contrastive (teacher) prompt during rollout generation
+  use_fewshot_examples: false    # include few-shot examples in the training prompt
   label_noise_correct_prob: 0.40
   label_noise_flip_prob: 0.30
   label_noise_unknown_prob: 0.30
@@ -17,9 +18,11 @@ training:
   max_steps: 100
   checkpoint_every: 5        # save Tinker checkpoint every N steps
   audit_log_path: "audit_log.jsonl"
-  granularity_weight: 0.0
-  margin_weight: 0.0
-  margin_target: 0.45
+  eval_audit_log_path: "eval_audit_log.jsonl"
+  granularity_weight: 0.15       # weight for granularity bonus (0 = disabled)
+  margin_weight: 0.25            # weight for margin reward (0 = disabled)
+  margin_target: 0.45           # target margin for margin_reward sigmoid center
+  margin_sigmoid_beta: 8.0      # steepness of the margin sigmoid
   group_variance_top_p: 0.9  # keep only the top-p fraction of docs by reward variance; 1.0 = no filtering
 
 sampling:
@@ -29,13 +32,13 @@ sampling:
   reasoning_effort: "low"
 
 frozen:
-  provider: "deepinfra"      # "deepinfra" or "gemini"
-  model: "openai/gpt-oss-120b"
-  gemini_model: "gemini-2.5-pro-preview-05-06"
+  provider: "deepinfra"
+  # model: "openai/gpt-oss-120b"
+  model: "Qwen/Qwen3-235B-A22B-Instruct-2507"
   seed: 2262
   max_concurrent: 512         # max parallel requests
   max_tokens: 8192
-  reasoning_effort: "medium"    # deepinfra: reasoning_effort; gemini: thinking_level (low/medium/high)
+  reasoning_effort: "low"    # deepinfra: reasoning_effort; gemini: thinking_level (low/medium/high)
 
 wandb:
   enabled: true

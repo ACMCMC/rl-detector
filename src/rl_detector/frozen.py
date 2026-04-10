@@ -9,31 +9,45 @@ from openai import AsyncOpenAI, RateLimitError
 
 from rl_detector.config import CFG
 from rl_detector.prompts import FROZEN_SCORE_PROMPT
+from rl_detector.rewards import _parse_xml_response
 
 logger = logging.getLogger(__name__)
 
 # global semaphore shared across all docs and rollouts
 _SEMAPHORE: asyncio.Semaphore | None = None
 
+# Regex fallback only — matches both single- and double-quoted attributes
 _TELL_TAG_RE = re.compile(r"<tell\b([^>]*)>(.*?)</tell>", re.DOTALL)
-_ATTR_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*\"([^\"]*)\"")
+_ATTR_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+
+
+def _parse_attr(m: re.Match) -> tuple[str, str]:
+    return m.group(1), m.group(2) if m.group(2) is not None else m.group(3)
 
 
 def _extract_scored_tells(text: str) -> list[dict]:
-    """Parse full <tell> tags and extract explanation/span/score as raw strings."""
+    """Parse <tell> tags and extract explanation/span/score. Uses XML with regex fallback."""
+    root = _parse_xml_response(text)
+    if root is not None:
+        return [
+            {
+                "span_text": "".join(tell.itertext()),
+                "explanation": tell.get("explanation", ""),
+                "type": tell.get("type"),
+                "score_raw": tell.get("score"),
+            }
+            for tell in root.iter("tell")
+        ]
+    # Regex fallback
     tells: list[dict] = []
     for m in _TELL_TAG_RE.finditer(text):
-        attrs_blob = m.group(1)
-        span = m.group(2)
-        attrs = {k: v for k, v in _ATTR_RE.findall(attrs_blob)}
-        tells.append(
-            {
-                "span_text": span,
-                "explanation": attrs.get("explanation", ""),
-                "type": attrs.get("type"),
-                "score_raw": attrs.get("score"),
-            }
-        )
+        attrs = {k: v for k, v in (_parse_attr(a) for a in _ATTR_RE.finditer(m.group(1)))}
+        tells.append({
+            "span_text": m.group(2),
+            "explanation": attrs.get("explanation", ""),
+            "type": attrs.get("type"),
+            "score_raw": attrs.get("score"),
+        })
     return tells
 
 
@@ -77,7 +91,7 @@ async def rank_indicators(
     async with sem:
         in_use_after = CFG.frozen.max_concurrent - sem._value
         logger.info("frozen | acquired semaphore slot (%d tells, in_use=%d/%d)", n, in_use_after, CFG.frozen.max_concurrent)
-        _MAX_RETRIES = 6
+        _MAX_RETRIES = 10
         _BASE_DELAY = 2.0
         for attempt in range(_MAX_RETRIES):
             try:

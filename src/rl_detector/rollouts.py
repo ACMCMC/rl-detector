@@ -8,15 +8,37 @@ from difflib import SequenceMatcher
 import tinker
 
 from rl_detector.config import CFG
-from rl_detector.prompts import contrastive
+from rl_detector.prompts import training_prompt
+from rl_detector.rewards import _parse_xml_response, _try_fix_xml
 
 logger = logging.getLogger(__name__)
 
-_TELL_TAG_RE = re.compile(r"<tell\b[^>]*>|</tell>")
+_TELL_TAG_RE = re.compile(r"<tell\b[^>]*>|</tell>|</?text>")
 
 
 def _strip_tags(text: str) -> str:
+    """Strip tell and text wrapper tags. Uses XML if parseable, else regex."""
+    root = _parse_xml_response(text)
+    if root is not None:
+        return "".join(root.itertext())
     return _TELL_TAG_RE.sub("", text)
+
+
+def fix_xml_quotes(response_text: str) -> str:
+    """
+    Normalize response_text to valid XML: fix single-quoted attributes, escape bare &.
+    Returns the fixed text if fixable, or the original text unmodified if not.
+    """
+    if _parse_xml_response(response_text) is not None:
+        return response_text  # already valid
+    wrapped = response_text if response_text.startswith("<text>") else f"<text>{response_text}</text>"
+    fixed = _try_fix_xml(wrapped)
+    if _parse_xml_response(fixed) is not None:
+        # Strip the wrapper we added if the original didn't have one
+        if not response_text.startswith("<text>"):
+            fixed = fixed[len("<text>"):-len("</text>")]
+        return fixed
+    return response_text
 
 
 def try_fix_response(response_text: str, document: str, max_fix_ratio: float = 0.05) -> str | None:
@@ -33,7 +55,12 @@ def try_fix_response(response_text: str, document: str, max_fix_ratio: float = 0
     matcher = SequenceMatcher(None, stripped, document, autojunk=False)
     opcodes = matcher.get_opcodes()
 
-    n_changed = sum(i2 - i1 for tag, i1, i2, j1, j2 in opcodes if tag != "equal")
+    # Count chars that differ on either side: deletions from stripped (i2-i1),
+    # insertions into document (j2-j1), or replacements (max of both sides).
+    n_changed = sum(
+        max(i2 - i1, j2 - j1)
+        for tag, i1, i2, j1, j2 in opcodes if tag != "equal"
+    )
     if n_changed == 0 or n_changed / max(len(document), 1) > max_fix_ratio:
         return None
 
@@ -136,10 +163,10 @@ async def generate_rollouts(
     assert len(show_labels_flags) == K, f"expected {K} show-label flags, got {len(show_labels_flags)}"
 
     async def _sample_one(i: int, contrast: dict, main_label_hint: int, show_labels: bool) -> dict:
-        prompt_text = contrastive(
+        prompt_text = training_prompt(
             document,
-            contrast["text"],
-            contrast["label"],
+            contrast_text=contrast["text"],
+            contrast_label=contrast["label"],
             main_label_hint=main_label_hint,
             show_labels=show_labels,
         )
@@ -177,6 +204,8 @@ async def generate_rollouts(
         completion_text = tokenizer.decode(completion_tokens)
 
         response_text = extract_response_text(completion_text)
+        # Normalize XML quotes/escaping before the typo fixer so strip_tags works correctly
+        response_text = fix_xml_quotes(response_text)
         fixed = try_fix_response(response_text, document)
         wrong_response_text = None
         was_text_fixed = False
